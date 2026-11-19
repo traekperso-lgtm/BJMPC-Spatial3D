@@ -65,7 +65,8 @@ if not exist "deps\ffmpeg\include" (
   echo [3/6] Telechargement de FFmpeg...
   if not exist deps mkdir deps
   if exist deps\ffmpeg rmdir /s /q deps\ffmpeg
-  curl -fL -o deps\ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-shared-7.1.zip
+  call :ffmpegurl
+  curl -fL -o deps\ffmpeg.zip "!FFURL!"
   if errorlevel 1 curl -fL -o deps\ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip
   if errorlevel 1 (
     echo  Telechargement de FFmpeg impossible - verifiez la connexion Internet.
@@ -160,6 +161,12 @@ if not defined ANYVS exit /b 0
 echo       Ajout du C++ a l'installation Visual Studio existante...
 powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait -FilePath '%VSSETUP%' -ArgumentList 'modify','--installPath','\"%ANYVS%\"','--add','Microsoft.VisualStudio.Workload.VCTools','--includeRecommended','--quiet','--norestart'"
 call :findvs
+exit /b 0
+
+rem Derniere version stable de FFmpeg chez BtbN (le nom du fichier change a chaque version)
+:ffmpegurl
+set "FFURL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
+for /f "usebackq delims=" %%U in (`powershell -NoProfile -Command "try { $r = Invoke-RestMethod https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest; $a = $r.assets | Where-Object { $_.name -match '^ffmpeg-n[0-9.]+-latest-win64-lgpl-shared-[0-9.]+[.]zip$' } | Sort-Object name -Descending | Select-Object -First 1; if ($a) { $a.browser_download_url } } catch {}"`) do set "FFURL=%%U"
 exit /b 0
 
 :hasvbcable
