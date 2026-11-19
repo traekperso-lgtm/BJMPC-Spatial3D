@@ -20,7 +20,7 @@ struct UiModel {
     int outputSel = -1;          // index dans outputs (sortie réellement utilisée)
     bool vbCableInstalled = true;
     bool sofaSupported = false;
-    std::string version = "0.4.0";
+    std::string version = "0.4.1";
 
     // Temps réel
     bool liveRunning = false, liveIdle = true, liveStarting = false;

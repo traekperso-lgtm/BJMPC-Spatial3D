@@ -289,7 +289,7 @@ bool playWasapi(const std::wstring& id, int channels, uint32_t mask, int rate, c
         std::string why;
         exclusive = initExclusive(dev.p, ac, channels, mask, rate, xf, ev, why);
         if (!exclusive) {
-            mode = "partage (exclusif impossible : " + why + ")";
+            mode = "partagé (exclusif impossible : " + why + ")";
             ac.reset();
             hr = dev->Activate(kIID_IAudioClient, CLSCTX_ALL, nullptr, (void**)&ac);
             if (FAILED(hr)) { CloseHandle(ev); err = hr2s("Activation IAudioClient impossible", hr); return false; }
@@ -301,13 +301,19 @@ bool playWasapi(const std::wstring& id, int channels, uint32_t mask, int rate, c
         hr = ac->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, (REFERENCE_TIME)opt.bufferMs * 10000, 0, (WAVEFORMATEX*)&wf, nullptr);
         if (FAILED(hr)) { CloseHandle(ev); err = hr2s("Initialisation du flux de sortie refusee", hr); return false; }
         ac->SetEventHandle(ev);
-        if (mode.empty()) mode = "partage";
+        if (mode.empty()) mode = "partagé";
     }
     UINT32 bufFrames = 0;
     ac->GetBufferSize(&bufFrames);
-    if (exclusive) {
-        char b[96];
-        snprintf(b, sizeof b, "exclusif, %s %d bits, %.1f ms", xf.isFloat ? "float" : "entier", xf.valid, 1000.0 * bufFrames / rate);
+    {
+        // Format réellement envoyé : preuve visible du mode WASAPI obtenu
+        char b[256];
+        if (exclusive)
+            snprintf(b, sizeof b, "exclusif — %s %d bits, %d Hz, %d canaux, période %.1f ms (directement à la carte son)",
+                     xf.isFloat ? "flottant" : "entier", xf.valid, rate, channels, 1000.0 * bufFrames / rate);
+        else
+            snprintf(b, sizeof b, "%s — flottant 32 bits, %d Hz, %d canaux, tampon %.0f ms (via le mélangeur de Windows)",
+                     mode.c_str(), rate, channels, 1000.0 * bufFrames / rate);
         mode = b;
     }
     if (modeInfo) *modeInfo = mode;

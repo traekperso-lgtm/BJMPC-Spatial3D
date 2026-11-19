@@ -1,6 +1,6 @@
 # Spatial3D — spatialisation 3D pour Windows
 
-**BJMPC Informatique** · v0.4.0 · C++17
+**BJMPC Informatique** · v0.4.1 · C++17
 
 Spatial3D regarde comment le PC est équipé (casque, stéréo, 5.1, 7.1, 7.1.4…) et place chaque son au
 meilleur endroit possible sur **ce** matériel.
@@ -96,6 +96,11 @@ horloge. Ce que fait Spatial3D pour éviter les pops :
 - **sortie WASAPI exclusive** en option (Réglages > Temps réel, ou `--exclusif`) : Spatial3D parle
   directement à la carte son, sans le mélangeur de Windows ; repli automatique en partagé si la carte
   refuse (déjà utilisée, exclusif interdit dans ses propriétés).
+
+**Vérifier le mode WASAPI** : l'état (onglet Temps réel) affiche le format réellement envoyé, par exemple
+« exclusif — entier 24 bits, 48000 Hz, 2 canaux, période 10.0 ms (directement à la carte son) » ou
+« partagé — flottant 32 bits, 48000 Hz, 8 canaux (via le mélangeur de Windows) ». En exclusif, Spatial3D
+disparaît aussi du mélangeur de volume de Windows et les autres sons de cette carte se taisent.
 
 La ligne « Pertes VB-Cable » compte les trous signalés par Windows *avant* Spatial3D : si elle monte,
 c'est VB-Cable qui décroche (augmentez sa latence dans son panneau, *VB-Audio Virtual Cable Control
