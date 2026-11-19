@@ -1,0 +1,75 @@
+# Compile Spatial3D pour Windows à chaque push et publie un zip prêt à l'emploi
+# (onglet Actions > dernière exécution > Artifacts > Spatial3D-win64)
+name: Windows
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: FFmpeg (BtbN, LGPL, DLL)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-lgpl-shared-7.1.zip"
+          Invoke-WebRequest $url -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath deps
+          Get-ChildItem deps -Directory | Select-Object -First 1 | Rename-Item -NewName ffmpeg
+
+      - name: libmysofa (HRTF mesurées)
+        run: vcpkg install libmysofa:x64-windows
+
+      - name: Configuration
+        shell: pwsh
+        run: >
+          cmake -S . -B build -A x64
+          -DFFMPEG_ROOT="${{ github.workspace }}/deps/ffmpeg"
+          -DS3D_WITH_MYSOFA=ON
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Compilation
+        run: cmake --build build --config Release
+
+      - name: Tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Paquet
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item build/Release/Spatial3D.exe, build/Release/spatial3d-cli.exe, build/Release/*.dll dist/
+          Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -Recurse -Filter *.sofa |
+            Copy-Item -Destination dist/
+          Copy-Item README.md, Spatial3D-lancer.bat, Spatial3D-temps-reel.bat dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Spatial3D-win64
+          path: dist
+
+      # Sur un tag vX.Y.Z : Release GitHub avec le zip Windows prêt à l'emploi
+      - name: Zip de la release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath "Spatial3D-${{ github.ref_name }}-win64.zip"
+
+      - name: Release GitHub
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Spatial3D ${{ github.ref_name }}
+          files: Spatial3D-${{ github.ref_name }}-win64.zip
+          body: |
+            Spatial3D pour Windows (64 bits).
+            1. Installez VB-Cable (https://vb-audio.com/Cable/) pour le mode temps réel, puis redémarrez.
+            2. Décompressez le zip et lancez Spatial3D.exe.
+            Ou, depuis les sources : double-clic sur build-windows.bat (installe tout et crée les raccourcis).
