@@ -385,15 +385,23 @@ static void liveTab(UiModel& m, UiActions& a, float s) {
             ImGui::TableNextColumn();
             if (col) ImGui::TextColored(*col, "%s", v.c_str()); else ImGui::TextUnformatted(v.c_str());
         };
-        char b[64];
+        char b[160];
         if (!m.liveRunning) row("Spatialisation", "arrêtée");
         else {
             row("Signal", m.liveIdle ? "en attente de son" : "reçu", m.liveIdle ? &kDim : &kGreen);
-            snprintf(b, sizeof b, "%.0f ms (point bas %.1f)", m.marginMs, m.lowMs); row("Latence ajoutée", b);
+            if (m.totalLatencyMs > 0) {
+                snprintf(b, sizeof b, "%.1f ms", m.totalLatencyMs);
+                row("Latence estimée", b, m.totalLatencyMs <= 25 ? &kGreen : nullptr);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Capture %.1f ms + marge %.0f ms + traitement %.1f ms + sortie %.1f ms",
+                                      m.capturePeriodMs, m.marginMs, m.processingMs, m.outputBufferMs);
+            }
+            snprintf(b, sizeof b, "%.0f ms (point bas %.1f)", m.marginMs, m.lowMs); row("Marge VB-Cable", b);
             snprintf(b, sizeof b, "%+.0f ppm", m.driftPpm); row("Dérive d'horloge", b);
             snprintf(b, sizeof b, "%.0f Hz", m.inHz); row("Entrée VB-Cable", m.inHz > 0 ? b : "—");
             snprintf(b, sizeof b, "%d (fondues, sans clic)", m.underruns); row("Coupures", m.underruns ? b : "0", m.underruns > 3 ? &kAmber : nullptr);
             snprintf(b, sizeof b, "%d", m.captureGlitches); row("Pertes VB-Cable", b, m.captureGlitches > 0 ? &kAmber : nullptr);
+            if (!m.liveCaptureMode.empty()) row("Capture WASAPI", m.liveCaptureMode);
             if (!m.liveOutputMode.empty()) row("Sortie WASAPI", m.liveOutputMode);
         }
         ImGui::EndTable();
@@ -405,67 +413,6 @@ static void liveTab(UiModel& m, UiActions& a, float s) {
     ImGui::BeginChild("##liveR", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     const float sceneH = ImGui::GetContentRegionAvail().y - 118 * s - ImGui::GetStyle().ItemSpacing.y;
     const Scene* sc = m.liveRunning ? &m.liveScene : nullptr;
-    drawScene(sc, m.previewLayout, in, out, sceneH, s);
-    drawMeters(sc ? sc->out : m.previewLayout, sc ? sc->inChannels : 0, in, out, sc, s);
-    ImGui::EndChild();
-}
-
-static void playerTab(UiModel& m, UiActions& a, float s) {
-    static float in[32], out[32];
-    smooth(in, m.fileIn, 32); smooth(out, m.fileOut, 32);
-    const float leftW = 380 * s;
-    ImGui::BeginChild("##fileL", ImVec2(leftW, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-
-    beginCard("##filecmd");
-    sectionTitle("Lecteur");
-    if (ImGui::Button("Ouvrir un fichier…", ImVec2(-FLT_MIN, 40 * s))) a.openFileDialog = true;
-    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-    ImGui::TextWrapped("ou glissez un film / une musique sur la fenêtre. Formats : MKV, MP4, FLAC, WAV, MP3, AC-3, DTS, "
-                       "TrueHD, Opus, Ambisonique (vidéos 360°)…");
-    ImGui::PopStyleColor();
-    if (!m.fileError.empty()) wrappedColored(kRed, m.fileError);
-    endCard();
-
-    if (m.fileActive) {
-        ImGui::Spacing();
-        beginCard("##filenow");
-        ImGui::PushFont(font(F_HEAD));
-        ImGui::TextWrapped("%s", m.fileName.c_str());
-        ImGui::PopFont();
-        ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-        ImGui::TextWrapped("%s", m.fileInfo.c_str());
-        ImGui::PopStyleColor();
-        ImGui::Spacing();
-        static bool dragging = false; static float dragPos = 0;
-        float pos = dragging ? dragPos : (float)m.filePos;
-        const float dur = (float)std::max(0.1, m.fileDur);
-        ImGui::SetNextItemWidth(-FLT_MIN);
-        const std::string fmt = mmss(pos) + " / " + (m.fileDur > 0 ? mmss(m.fileDur) : std::string("--:--"));
-        if (ImGui::SliderFloat("##pos", &pos, 0.f, dur, fmt.c_str(), ImGuiSliderFlags_NoInput)) { dragging = true; dragPos = pos; }
-        if (ImGui::IsItemDeactivated() && dragging) { a.seekTo = dragPos; dragging = false; }
-        const float bw = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
-        const bool showPlay = m.filePaused || m.fileFinished;
-        if (ImGui::Button(showPlay ? "▶  Lecture" : "‖  Pause", ImVec2(bw, 36 * s))) {
-            if (m.fileFinished) a.seekTo = 0;
-            a.togglePause = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("■  Fermer", ImVec2(bw, 36 * s))) a.closeFile = true;
-        if (m.fileFinished) ImGui::TextColored(kDim, "Lecture terminée");
-        endCard();
-    }
-
-    ImGui::Spacing();
-    beginCard("##fileout");
-    outputCombos(m, a);
-    volumeSlider(m, a);
-    endCard();
-    ImGui::EndChild();
-
-    ImGui::SameLine();
-    ImGui::BeginChild("##fileR", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-    const float sceneH = ImGui::GetContentRegionAvail().y - 118 * s - ImGui::GetStyle().ItemSpacing.y;
-    const Scene* sc = m.fileActive ? &m.fileScene : nullptr;
     drawScene(sc, m.previewLayout, in, out, sceneH, s);
     drawMeters(sc ? sc->out : m.previewLayout, sc ? sc->inChannels : 0, in, out, sc, s);
     ImGui::EndChild();
@@ -531,15 +478,19 @@ static void settingsTab(UiModel& m, UiActions& a, float s) {
     sectionTitle("Temps réel");
     int mg = m.settings.marginMs;
     ImGui::TextDisabled("Marge de départ");
-    helpMarker("Latence de sécurité entre VB-Cable et la carte son. Elle augmente seule de 10 ms à chaque coupure "
+    helpMarker("Latence de sécurité entre VB-Cable et la carte son. Elle augmente seule à chaque coupure "
                "et la valeur apprise est gardée pour la prochaine fois.");
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::SliderInt("##marge", &mg, 5, 100, "%d ms")) m.settings.marginMs = mg;
     if (ImGui::IsItemDeactivatedAfterEdit()) a.settingsChanged = a.needRestart = true;
+    if (ImGui::Checkbox("Latence minimale (périodes WASAPI les plus courtes)", &m.settings.lowLatency)) a.settingsChanged = a.needRestart = true;
+    helpMarker("Windows 10/11 : le moteur audio tourne à la période minimale du pilote (souvent 2,7 ms au lieu "
+               "de 10 ms), en capture comme en sortie ; en exclusif, période matérielle minimale. Décochez si "
+               "un vieux pilote produit des craquements.");
     if (ImGui::Checkbox("Sortie WASAPI exclusive", &m.settings.exclusive)) a.settingsChanged = a.needRestart = true;
     helpMarker("Spatial3D parle directement à la carte son, sans le mélangeur de Windows : latence plus faible "
-               "et moins de risques de pops. La carte est alors réservée à Spatial3D (le lecteur de fichiers "
-               "ne peut plus l'utiliser en même temps). Repli automatique en mode partagé si la carte refuse.");
+               "et moins de risques de pops. La carte est alors réservée à Spatial3D (les autres applications ne "
+               "peuvent plus l'utiliser en même temps). Repli automatique en mode partagé si la carte refuse.");
     if (ImGui::Checkbox("Ne pas basculer la sortie de Windows sur VB-Cable", &m.settings.keepDefault)) a.settingsChanged = a.needRestart = true;
     helpMarker("Cochez si vous préférez choisir « CABLE Input » vous-même dans chaque application.");
     if (ImGui::Button("Rétablir le son normal (sortie par défaut)")) a.restoreSound = true;
@@ -557,7 +508,7 @@ static void settingsTab(UiModel& m, UiActions& a, float s) {
     ImGui::Spacing();
 
     ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-    ImGui::TextWrapped("Spatial3D %s — BJMPC Informatique. Décodage : FFmpeg (LGPL). Interface : Dear ImGui (MIT). "
+    ImGui::TextWrapped("Spatial3D %s — BJMPC Informatique. Interface : Dear ImGui (MIT). "
                        "Carte son virtuelle : VB-Cable de VB-Audio (donationware).", m.version.c_str());
     ImGui::PopStyleColor();
     ImGui::EndChild();
@@ -583,9 +534,8 @@ void uiDraw(UiModel& m, UiActions& a, float s) {
         ImGui::SetCursorPosY(y + ImGui::GetFontSize() * 0.55f);
         ImGui::TextDisabled("spatialisation 3D · BJMPC Informatique");
     }
-    const char* st = m.liveRunning ? (m.liveIdle ? "Son 3D actif · en attente" : "Son 3D actif")
-                   : m.fileActive ? (m.filePaused ? "Lecteur en pause" : "Lecture") : "Inactif";
-    const ImVec4 stc = m.liveRunning ? (m.liveIdle ? kAmber : kGreen) : m.fileActive ? kAccent : kDim;
+    const char* st = m.liveRunning ? (m.liveIdle ? "Son 3D actif · en attente" : "Son 3D actif") : "Inactif";
+    const ImVec4 stc = m.liveRunning ? (m.liveIdle ? kAmber : kGreen) : kDim;
     const float pillW = ImGui::CalcTextSize(st).x + ImGui::GetFontSize() * 2.6f;
     ImGui::SameLine(ImGui::GetWindowWidth() - pillW - ImGui::GetStyle().WindowPadding.x);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetFontSize() * 0.35f);
@@ -595,8 +545,7 @@ void uiDraw(UiModel& m, UiActions& a, float s) {
     if (ImGui::BeginTabBar("##tabs")) {
         auto fl = [&](int k) { return m.forceTab == k ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None; };
         if (ImGui::BeginTabItem("  Temps réel  ", nullptr, fl(0))) { liveTab(m, a, s); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("  Lecteur  ", nullptr, fl(1))) { playerTab(m, a, s); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("  Réglages  ", nullptr, fl(2))) { settingsTab(m, a, s); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("  Réglages  ", nullptr, fl(1))) { settingsTab(m, a, s); ImGui::EndTabItem(); }
         m.forceTab = -1;
         ImGui::EndTabBar();
     }

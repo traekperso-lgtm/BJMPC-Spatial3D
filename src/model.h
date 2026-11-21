@@ -14,9 +14,10 @@ struct Settings {
     double room = -1;                 // -1 = auto (15 % au casque, 0 sur enceintes)
     double gainDb = 0;
     std::string sofaPath;
-    int marginMs = 10;
+    int marginMs = 6;
     bool keepDefault = false;         // temps réel : ne pas basculer Windows sur VB-Cable
     bool exclusive = false;           // temps réel : sortie WASAPI en mode exclusif
+    bool lowLatency = true;           // période WASAPI minimale (IAudioClient3 en partagé)
     // préférences de l'interface
     bool liveOnLaunch = false;
     bool closeToTray = true;

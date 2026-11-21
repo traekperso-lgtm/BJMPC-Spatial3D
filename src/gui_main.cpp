@@ -46,20 +46,13 @@ bool g_trayBalloonShown = false;
 bool g_quitting = false;
 
 LiveEngine g_live;
-FilePlayer g_player;
 UiModel g_m;
-std::string g_filePath, g_liveStartError, g_fileOpenError;
+std::string g_liveStartError;
 std::future<std::string> g_liveStart;     // démarrage en arrière-plan
-std::vector<std::string> g_pendingFiles;
 bool g_pendingShow = false;
 
 // ---------------------------------------------------------------------------------------------
 std::string utf8(const std::wstring& w) { return toUtf8(w); }
-
-std::string baseName(const std::string& p) {
-    const size_t k = p.find_last_of("\\/");
-    return k == std::string::npos ? p : p.substr(k + 1);
-}
 
 float dpiScaleFor(HWND h) {
     using Fn = UINT(WINAPI*)(HWND);
@@ -205,14 +198,6 @@ void stopLive() {
     g_live.stop();
 }
 
-void openFile(const std::string& path) {
-    g_fileOpenError.clear();
-    g_m.fileScene = Scene{};
-    std::string err;
-    if (!g_player.open(path, g_m.settings, err)) { g_fileOpenError = baseName(path) + " : " + err; g_filePath.clear(); return; }
-    g_filePath = path;
-}
-
 std::wstring fileDialog(const wchar_t* filter, const wchar_t* title) {
     wchar_t buf[MAX_PATH * 2] = {};
     OPENFILENAMEW of{};
@@ -227,7 +212,7 @@ std::wstring fileDialog(const wchar_t* filter, const wchar_t* title) {
 }
 
 void applyActions(const UiActions& a) {
-    if (a.gainChanged) { g_live.setGainDb(g_m.settings.gainDb); g_player.setGainDb(g_m.settings.gainDb); }
+    if (a.gainChanged) g_live.setGainDb(g_m.settings.gainDb);
     if (a.settingsChanged) { saveSettings(g_m.settings); refreshDevices(); }
     if (a.startWithWindowsChanged) setStartWithWindows(g_m.settings.startWithWindows, L"--tray");
     if (a.toggleLive) {
@@ -235,22 +220,7 @@ void applyActions(const UiActions& a) {
     }
     if (a.needRestart) {
         if (g_live.running()) { stopLive(); startLiveAsync(); }
-        if (g_player.active() && !g_filePath.empty()) {
-            const double pos = g_player.position();
-            const bool paused = g_player.paused();
-            openFile(g_filePath);
-            if (g_player.active()) { g_player.seek(pos); if (paused) g_player.togglePause(); }
-        }
     }
-    if (a.openFileDialog) {
-        const std::wstring f = fileDialog(
-            L"Audio et vidéo\0*.mkv;*.mp4;*.m4v;*.mov;*.avi;*.webm;*.ts;*.m2ts;*.flac;*.wav;*.mp3;*.m4a;*.aac;*.ogg;*.opus;*.ac3;*.eac3;*.dts;*.thd;*.mka;*.wma;*.aiff\0Tous les fichiers\0*.*\0",
-            L"Ouvrir un fichier");
-        if (!f.empty()) openFile(utf8(f));
-    }
-    if (a.seekTo >= 0) g_player.seek(a.seekTo);
-    if (a.togglePause) g_player.togglePause();
-    if (a.closeFile) { g_player.close(); g_filePath.clear(); }
     if (a.browseSofa) {
         const std::wstring f = fileDialog(L"HRTF SOFA\0*.sofa\0", L"Choisir une HRTF (.sofa)");
         if (!f.empty()) {
@@ -291,10 +261,7 @@ void refreshDevices() {
     }
 }
 
-void updatePlayerModel();
-
 void updateModel() {
-    updatePlayerModel();
     // fin d'un démarrage en arrière-plan
     if (g_liveStart.valid() && g_liveStart.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         g_liveStartError = g_liveStart.get();
@@ -314,6 +281,9 @@ void updateModel() {
     g_m.drops = st.drops;
     g_m.captureGlitches = st.captureGlitches;
     g_m.liveOutputMode = st.outputMode;
+    g_m.liveCaptureMode = st.captureMode;
+    g_m.capturePeriodMs = st.capturePeriodMs; g_m.processingMs = st.processingMs;
+    g_m.outputBufferMs = st.outputBufferMs; g_m.totalLatencyMs = st.totalLatencyMs;
     g_m.liveError = !g_liveStartError.empty() ? g_liveStartError : st.error;
     g_m.liveWarning = st.running ? st.warning : std::string();
     if (st.running && g_m.liveScene.out.speakers.empty()) g_m.liveScene = g_live.scene();
@@ -323,20 +293,6 @@ void updateModel() {
     trayTip(g_m.liveRunning ? L"Spatial3D — son 3D actif" : L"Spatial3D");
 }
 
-void updatePlayerModel() {
-    g_m.fileActive = g_player.active();
-    g_m.filePaused = g_player.paused();
-    g_m.fileFinished = g_player.finished();
-    g_m.filePos = g_player.position();
-    g_m.fileDur = g_player.duration();
-    g_m.fileName = baseName(g_filePath);
-    g_m.fileInfo = g_player.info();
-    g_m.fileError = !g_fileOpenError.empty() ? g_fileOpenError : g_player.error();
-    if (g_m.fileActive && g_m.fileScene.out.speakers.empty()) g_m.fileScene = g_player.scene();
-    if (!g_m.fileActive) g_m.fileScene = Scene{};
-    for (int i = 0; i < 32; ++i) { g_m.fileIn[i] = g_player.meters.in[i].exchange(0.f); g_m.fileOut[i] = g_player.meters.out[i].exchange(0.f); }
-
-}
 
 // ---------------------------------------------------------------------------------------------
 LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -373,17 +329,9 @@ LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
-    case WM_DROPFILES: {
-        HDROP d = (HDROP)wp;
-        wchar_t p[MAX_PATH * 2];
-        if (DragQueryFileW(d, 0, p, MAX_PATH * 2)) g_pendingFiles.push_back(utf8(p));
-        DragFinish(d);
-        return 0;
-    }
-    case WM_COPYDATA: {   // une deuxième instance nous transmet un fichier (ou demande l'affichage)
+    case WM_COPYDATA: {   // une deuxième instance demande l'affichage de la fenêtre
         auto* cd = (COPYDATASTRUCT*)lp;
         if (cd->dwData == 1) {
-            if (cd->cbData > 0) g_pendingFiles.push_back(std::string((const char*)cd->lpData, cd->cbData));
             g_pendingShow = true;
         }
         return TRUE;
@@ -430,21 +378,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool tray = false;
-    std::wstring fileArg;
     for (int i = 1; i < argc; ++i) {
         const std::wstring a = argv[i];
         if (a == L"--configurer-cable") { CoInitializeEx(nullptr, COINIT_MULTITHREADED); return configureCable(); }
         if (a == L"--tray") tray = true;
-        else if (!a.empty() && a[0] != L'-') fileArg = a;
     }
     LocalFree(argv);
 
-    // Instance unique : on passe le fichier à la fenêtre existante
+    // Instance unique : on réveille la fenêtre existante
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\Spatial3D_Instance");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (HWND other = FindWindowW(kClass, nullptr)) {
-            const std::string p = toUtf8(fileArg);
-            COPYDATASTRUCT cd{ 1, (DWORD)p.size(), (void*)p.data() };
+            COPYDATASTRUCT cd{ 1, 0, nullptr };
             SendMessageW(other, WM_COPYDATA, 0, (LPARAM)&cd);
         }
         return 0;
@@ -478,7 +423,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
         MessageBoxW(nullptr, L"Direct3D 11 indisponible : impossible d'afficher l'interface.", L"Spatial3D", MB_ICONERROR);
         return 1;
     }
-    DragAcceptFiles(g_hwnd, TRUE);
     trayAdd();
 
     IMGUI_CHECKVERSION();
@@ -495,23 +439,35 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
     refreshDevices();
     if (!tray) { ShowWindow(g_hwnd, nShow); UpdateWindow(g_hwnd); }
     if (g_m.settings.liveOnLaunch) startLiveAsync();
-    if (!fileArg.empty()) { openFile(toUtf8(fileArg)); g_m.forceTab = 1; }
 
     auto lastRefresh = std::chrono::steady_clock::now();
+    auto lastInput = lastRefresh, lastFrame = lastRefresh;
     bool done = false;
     while (!done) {
         const bool visible = IsWindowVisible(g_hwnd) && !IsIconic(g_hwnd);
         if (!visible) MsgWaitForMultipleObjects(0, nullptr, FALSE, 250, QS_ALLINPUT);
+        else {
+            // Interface économe : pleine fluidité pendant l'interaction, puis ~30 i/s (vumètres)
+            // ou ~10 i/s à l'arrêt, pour laisser le processeur au fil audio. Toute entrée réveille.
+            const auto t = std::chrono::steady_clock::now();
+            if (t - lastInput > std::chrono::seconds(1)) {
+                const auto period = std::chrono::milliseconds(g_m.liveRunning ? 33 : 100);
+                const auto wait = period - std::chrono::duration_cast<std::chrono::milliseconds>(t - lastFrame);
+                if (wait.count() > 0) MsgWaitForMultipleObjects(0, nullptr, FALSE, (DWORD)wait.count(), QS_ALLINPUT);
+            }
+            lastFrame = std::chrono::steady_clock::now();
+        }
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if ((msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) ||
+                (msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST) || msg.message == WM_SIZE)
+                lastInput = std::chrono::steady_clock::now();
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             if (msg.message == WM_QUIT) done = true;
         }
         if (done) break;
 
-        for (auto& f : g_pendingFiles) { openFile(f); g_m.forceTab = 1; g_pendingShow = true; }
-        g_pendingFiles.clear();
         if (g_pendingShow) { showWindow(); g_pendingShow = false; }
 
         const auto now = std::chrono::steady_clock::now();
@@ -547,7 +503,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
 
     // Sortie propre : la vraie carte son redevient la sortie par défaut
     stopLive();
-    g_player.close();
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

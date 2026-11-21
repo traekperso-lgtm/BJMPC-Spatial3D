@@ -4,23 +4,36 @@
 
 namespace s3d {
 
-void FrameQueue::push(const float* x, size_t frames) {
-    std::lock_guard<std::mutex> lk(m_);
-    q_.insert(q_.end(), x, x + frames * ch_);
+void SpscRing::init(size_t capacity) {
+    size_t n = 1; while (n < capacity) n <<= 1;
+    buf_.assign(n, 0.f);
+    mask_ = n - 1;
+    head_ = 0; tail_ = 0;
 }
 
-void FrameQueue::pushSilence(size_t frames) {
-    std::lock_guard<std::mutex> lk(m_);
-    q_.insert(q_.end(), frames * ch_, 0.f);
+size_t SpscRing::available() const { return head_.load(std::memory_order_acquire) - tail_.load(std::memory_order_acquire); }
+
+size_t SpscRing::push(const float* x, size_t n) {
+    const size_t h = head_.load(std::memory_order_relaxed), t = tail_.load(std::memory_order_acquire);
+    n = std::min(n, buf_.size() - (h - t));
+    for (size_t i = 0; i < n; ++i) buf_[(h + i) & mask_] = x[i];
+    head_.store(h + n, std::memory_order_release);
+    return n;
 }
 
-void FrameQueue::drainTo(std::vector<float>& dst) {
-    std::lock_guard<std::mutex> lk(m_);
-    dst.insert(dst.end(), q_.begin(), q_.end());
-    q_.clear();
+size_t SpscRing::pop(float* dst, size_t max) {
+    const size_t t = tail_.load(std::memory_order_relaxed), h = head_.load(std::memory_order_acquire);
+    const size_t n = std::min(max, h - t);
+    for (size_t i = 0; i < n; ++i) dst[i] = buf_[(t + i) & mask_];
+    tail_.store(t + n, std::memory_order_release);
+    return n;
 }
 
-void AdaptiveResampler::init(int channels) { ch_ = channels; reset(); }
+void AdaptiveResampler::init(int channels, size_t capacityFrames) {
+    ch_ = channels;
+    buf_.reserve(capacityFrames * channels);   // les ajouts suivants ne réallouent pas
+    reset();
+}
 
 void AdaptiveResampler::reset() {
     buf_.assign((size_t)ch_, 0.f);   // une trame de marge pour l'interpolation
@@ -28,6 +41,7 @@ void AdaptiveResampler::reset() {
 }
 
 void AdaptiveResampler::push(const std::vector<float>& x) { buf_.insert(buf_.end(), x.begin(), x.end()); }
+void AdaptiveResampler::push(const float* x, size_t frames) { buf_.insert(buf_.end(), x, x + frames * ch_); }
 
 double AdaptiveResampler::available() const {
     const double frames = (double)(buf_.size() / ch_);
@@ -102,7 +116,8 @@ double DriftController::update(double residual, size_t outFrames) {
 void LiveInputStage::init(int channels, double inRate, double outRate, int marginMs) {
     ch_ = channels; inRate_ = inRate;
     F_ = std::max(16, (int)std::lround(0.002 * outRate));
-    rs_.init(channels);
+    rs_.init(channels, (size_t)(inRate * 2));
+    old_.reserve((size_t)F_ * channels);
     dc_.init(inRate, outRate, marginMs);
     priming_ = true; fadeIn_ = 0; underruns_ = 0; drops_ = 0;
 }

@@ -5,10 +5,15 @@
 #include "vbap.h"
 #include "live_core.h"
 #include "dsp.h"
+#include "convolver.h"
+#include "wav_reader.h"
+#include "wav_writer.h"
 #include <random>
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include <thread>
+#include <atomic>
 
 using namespace s3d;
 static const double M_PI_F = 3.14159265358979323846;
@@ -205,7 +210,7 @@ static void testLimiter() {
     Limiter lim; lim.init(fs, 2, 0.97f);
     lim.process(x.data(), n);
     float peak = 0; double maxGainStep = 0, prevG = 1; int prevI = 0;
-    const int D = 95;   // latence (2 ms - 1 trame)
+    const int D = lim.latencyFrames();   // latence d'anticipation
     for (int i = D; i < n; ++i) {
         peak = std::max(peak, std::fabs(x[2 * i]));
         if (std::fabs(in[2 * (i - D)]) > 0.2f) {
@@ -237,7 +242,7 @@ static void testLiveStage() {
             const size_t n = (size_t)std::max(0.0, std::round((until - tIn) * inRate));
             chunk.resize(n);
             for (size_t k = 0; k < n; ++k) { chunk[k] = (float)std::sin(phase); phase += 2 * M_PI_F * f / inRate; }
-            st.feed(chunk);
+            st.feed(chunk.data(), n);
             tIn += n / inRate;
             nextIn = std::max(nextIn, tIn) + burst(rng);
         } else {
@@ -253,6 +258,79 @@ static void testLiveStage() {
     CHECK(maxStep < natural * 1.15, "Etage temps reel : coupures et sauts sans clic (fondus)");
 }
 
+// Anneau capture -> rendu : sans verrou, ordre et contenu préservés entre deux fils
+static void testSpscRing() {
+    SpscRing r; r.init(4096);
+    const size_t total = 2000000;
+    std::atomic<bool> okOrder{ true };
+    std::thread prod([&] {
+        std::vector<float> buf(333); size_t v = 0;
+        while (v < total) {
+            const size_t n = std::min(buf.size(), total - v);
+            for (size_t k = 0; k < n; ++k) buf[k] = (float)((v + k) % 65536);
+            size_t done = 0;
+            while (done < n) { done += r.push(buf.data() + done, n - done); if (done < n) std::this_thread::yield(); }
+            v += n;
+        }
+    });
+    std::vector<float> out(517); size_t got = 0;
+    while (got < total) {
+        const size_t n = r.pop(out.data(), out.size());
+        for (size_t k = 0; k < n; ++k) if (out[k] != (float)((got + k) % 65536)) okOrder = false;
+        got += n;
+        if (!n) std::this_thread::yield();
+    }
+    prod.join();
+    printf("  anneau sans verrou : %zu echantillons transferes entre deux fils\n", got);
+    CHECK(okOrder && got == total && r.available() == 0, "Anneau SPSC : flux intact entre capture et rendu");
+}
+
+// Convolution partitionnée : identique à la convolution directe, latence d'un seul bloc
+static void testConvolver() {
+    std::mt19937 rng(5); std::uniform_real_distribution<float> u(-1, 1);
+    const int S = 3, N = 300, B = 128, blocks = 40;
+    std::vector<std::vector<float>> hl(S, std::vector<float>(N)), hr(S, std::vector<float>(N - 50));
+    for (auto& h : hl) for (auto& v : h) v = u(rng) * 0.2f;
+    for (auto& h : hr) for (auto& v : h) v = u(rng) * 0.2f;
+    std::vector<std::vector<float>> x(S, std::vector<float>(B * blocks));
+    for (auto& s : x) for (auto& v : s) v = u(rng);
+    PartitionedConvolver pc; pc.init(hl, hr, B);
+    std::vector<float> out(2 * B * blocks, 0.f);
+    for (int b = 0; b < blocks; ++b) {
+        const float* in[S]; for (int s = 0; s < S; ++s) in[s] = x[s].data() + b * B;
+        pc.processBlock(in, out.data() + 2 * b * B);
+    }
+    double maxErr = 0;
+    for (int n = 0; n < B * blocks; ++n) {
+        double l = 0, r = 0;
+        for (int s = 0; s < S; ++s) {
+            for (int k = 0; k < N && k <= n; ++k) l += hl[s][k] * x[s][n - k];
+            for (int k = 0; k < N - 50 && k <= n; ++k) r += hr[s][k] * x[s][n - k];
+        }
+        maxErr = std::max(maxErr, std::max(std::fabs(l - out[2 * n]), std::fabs(r - out[2 * n + 1])));
+    }
+    printf("  convolution partitionnee : %d tranches de %d, ecart max avec la convolution directe %.2e\n", pc.partitions(), B, maxErr);
+    CHECK(maxErr < 1e-4, "Convolution partitionnee identique a la convolution directe");
+    CHECK(pc.partitions() == 3, "Convolution : reponse decoupee en tranches de 128");
+}
+
+// Lecteur WAV : aller-retour avec l'écrivain (flottant 32 bits, masque 5.1)
+static void testWavRoundTrip() {
+    const char* path = "/tmp/s3d_test_51.wav";
+    std::vector<float> x(6 * 1000);
+    for (size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.01f * i) * 0.5f;
+    { WavWriter w; w.open(path, 6, 44100, 0x60F); w.write(x.data(), 1000); w.close(); }
+    WavReader r; std::string err;
+    CHECK(r.open(path, err), "WAV : ouverture");
+    CHECK(r.channels() == 6 && r.sampleRate() == 44100, "WAV : canaux et frequence");
+    CHECK(r.channelIds().size() == 6 && r.channelIds()[4] == CH_SL && r.channelIds()[5] == CH_SR, "WAV : disposition 5.1 lue dans le masque");
+    std::vector<float> y(6 * 1000);
+    size_t got = r.read(y.data(), 2000);
+    bool same = got == 1000;
+    for (size_t i = 0; same && i < x.size(); ++i) same = x[i] == y[i];
+    CHECK(same, "WAV : echantillons relus a l'identique");
+}
+
 int main() {
     testIdentity();
     testDownmix51to20();
@@ -263,6 +341,9 @@ int main() {
     testDrift();
     testLimiter();
     testLiveStage();
+    testSpscRing();
+    testConvolver();
+    testWavRoundTrip();
     printf("%d/%d verifications reussies\n", checks - fails, checks);
     return fails ? 1 : 0;
 }

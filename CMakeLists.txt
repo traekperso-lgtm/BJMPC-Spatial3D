@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Spatial3D VERSION 0.4.1 LANGUAGES CXX)
+project(Spatial3D VERSION 0.5.0 LANGUAGES CXX)
 if(WIN32)
   enable_language(RC)
 endif()
@@ -12,8 +12,6 @@ endif()
 
 option(S3D_WITH_MYSOFA "HRTF mesurees (.sofa) via libmysofa" OFF)
 option(S3D_BUILD_TESTS "Tests du moteur" ON)
-# Dossier d'une build FFmpeg "shared" (include/ lib/ bin/), ex. BtbN ffmpeg-n7.1-win64-lgpl-shared
-set(FFMPEG_ROOT "" CACHE PATH "Racine FFmpeg (sinon pkg-config / vcpkg)")
 
 # Runtime C++ statique : l'exe tourne sans redistribuable Visual C++
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -29,9 +27,9 @@ if(WIN32)
   add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
-# ---- Cœur portable (sans FFmpeg ni Windows) ----
+# ---- Cœur portable (aucune dépendance) ----
 add_library(s3dcore STATIC
-  src/layout.cpp src/vbap.cpp src/sources.cpp src/renderer.cpp src/dsp.cpp src/wav_writer.cpp src/live_core.cpp)
+  src/layout.cpp src/vbap.cpp src/sources.cpp src/renderer.cpp src/dsp.cpp src/wav_writer.cpp src/wav_reader.cpp src/live_core.cpp src/convolver.cpp)
 target_include_directories(s3dcore PUBLIC src)
 if(S3D_WITH_MYSOFA)
   find_package(mysofa CONFIG QUIET)
@@ -48,23 +46,9 @@ if(S3D_WITH_MYSOFA)
   target_compile_definitions(s3dcore PUBLIC S3D_WITH_MYSOFA)
 endif()
 
-# ---- FFmpeg ----
-add_library(s3d_ffmpeg INTERFACE)
-if(FFMPEG_ROOT)
-  target_include_directories(s3d_ffmpeg INTERFACE "${FFMPEG_ROOT}/include")
-  foreach(lib avformat avcodec swresample avutil)
-    find_library(FF_${lib} NAMES ${lib} lib${lib} PATHS "${FFMPEG_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
-    target_link_libraries(s3d_ffmpeg INTERFACE ${FF_${lib}})
-  endforeach()
-else()
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libswresample libavutil)
-  target_link_libraries(s3d_ffmpeg INTERFACE PkgConfig::FFMPEG)
-endif()
-
 # ---- Exécutable ----
-add_executable(spatial3d_cli src/main.cpp src/decoder.cpp)
-target_link_libraries(spatial3d_cli PRIVATE s3dcore s3d_ffmpeg)
+add_executable(spatial3d_cli src/main.cpp)
+target_link_libraries(spatial3d_cli PRIVATE s3dcore)
 # Windows ne distingue pas la casse : cible « spatial3d_cli » (projet distinct de « Spatial3D »), exe spatial3d-cli.exe
 set_target_properties(spatial3d_cli PROPERTIES OUTPUT_NAME spatial3d-cli)
 if(WIN32)
@@ -74,30 +58,20 @@ if(WIN32)
   if(MINGW)
     target_link_options(spatial3d_cli PRIVATE -static-libgcc -static-libstdc++)
   endif()
-  # Copie des DLL FFmpeg à côté de l'exe
-  if(FFMPEG_ROOT AND EXISTS "${FFMPEG_ROOT}/bin")
-    file(GLOB FF_DLLS "${FFMPEG_ROOT}/bin/*.dll")
-    add_custom_command(TARGET spatial3d_cli POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FF_DLLS} $<TARGET_FILE_DIR:spatial3d_cli>)
-  endif()
 endif()
 
 # ---- Interface graphique (Windows) ----
 if(WIN32)
   set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
   add_executable(Spatial3D WIN32
-    src/gui_main.cpp src/ui.cpp src/engine.cpp src/wasapi_output.cpp src/decoder.cpp res/spatial3d.rc
+    src/gui_main.cpp src/ui.cpp src/engine.cpp src/wasapi_output.cpp res/spatial3d.rc
     ${IMGUI_DIR}/imgui.cpp ${IMGUI_DIR}/imgui_draw.cpp ${IMGUI_DIR}/imgui_tables.cpp ${IMGUI_DIR}/imgui_widgets.cpp
     ${IMGUI_DIR}/backends/imgui_impl_win32.cpp ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp)
   target_include_directories(Spatial3D PRIVATE ${IMGUI_DIR})
   target_compile_definitions(Spatial3D PRIVATE UNICODE _UNICODE)
-  target_link_libraries(Spatial3D PRIVATE s3dcore s3d_ffmpeg d3d11 d3dcompiler dwmapi ole32 shell32 comdlg32 advapi32 avrt)
+  target_link_libraries(Spatial3D PRIVATE s3dcore d3d11 d3dcompiler dwmapi ole32 shell32 comdlg32 advapi32 avrt)
   if(MINGW)
     target_link_options(Spatial3D PRIVATE -static-libgcc -static-libstdc++ -municode)
-  endif()
-  if(FFMPEG_ROOT AND EXISTS "${FFMPEG_ROOT}/bin")
-    add_custom_command(TARGET Spatial3D POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FF_DLLS} $<TARGET_FILE_DIR:Spatial3D>)
   endif()
 endif()
 

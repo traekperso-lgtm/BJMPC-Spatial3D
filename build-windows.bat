@@ -2,10 +2,9 @@
 rem ============================================================================
 rem  Spatial3D - installation automatique (double-clic)
 rem  1. Installe CMake et les outils de compilation C++ Microsoft si absents (winget)
-rem  2. Telecharge FFmpeg (build LGPL de BtbN)
-rem  3. Compile et teste Spatial3D
-rem  4. Propose VB-Cable (carte son virtuelle) pour le mode temps reel
-rem  5. Installe dans %LOCALAPPDATA%\Spatial3D + raccourcis (Bureau, Envoyer vers, menu Demarrer)
+rem  2. Compile et teste Spatial3D
+rem  3. Propose VB-Cable (carte son virtuelle) pour le mode temps reel
+rem  4. Installe dans %LOCALAPPDATA%\Spatial3D + raccourcis (Bureau, menu Demarrer)
 rem     Spatial3D.exe = interface graphique ; spatial3d-cli.exe = ligne de commande
 rem  Options passees a CMake : build-windows.bat -DS3D_WITH_MYSOFA=ON ...
 rem ============================================================================
@@ -34,7 +33,7 @@ if errorlevel 1 (
 rem ---------- 1. CMake ----------
 call :findcmake
 if not defined CMAKE (
-  echo [1/6] Installation de CMake...
+  echo [1/5] Installation de CMake...
   winget install -e --id Kitware.CMake --source winget --silent --accept-package-agreements --accept-source-agreements
   call :findcmake
 )
@@ -42,12 +41,12 @@ if not defined CMAKE (
   echo  CMake n'a pas pu etre installe.
   goto :err
 )
-echo [1/6] CMake : OK
+echo [1/5] CMake : OK
 
 rem ---------- 2. Outils de compilation C++ ----------
 call :findvs
 if not defined VSPATH (
-  echo [2/6] Installation des outils de compilation C++ Microsoft
+  echo [2/5] Installation des outils de compilation C++ Microsoft
   echo       environ 3 Go, de 5 a 20 minutes - acceptez la demande d'autorisation Windows
   winget install -e --id Microsoft.VisualStudio.2022.BuildTools --source winget --accept-package-agreements --accept-source-agreements --override "--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
   call :findvs
@@ -58,41 +57,23 @@ if not defined VSPATH (
   echo  redemarrez puis relancez ce fichier.
   goto :err
 )
-echo [2/6] Outils C++ : OK  (!VSPATH!)
+echo [2/5] Outils C++ : OK  (!VSPATH!)
 
-rem ---------- 3. FFmpeg ----------
-if not exist "deps\ffmpeg\include" (
-  echo [3/6] Telechargement de FFmpeg...
-  if not exist deps mkdir deps
-  if exist deps\ffmpeg rmdir /s /q deps\ffmpeg
-  call :ffmpegurl
-  curl -fL -o deps\ffmpeg.zip "!FFURL!"
-  if errorlevel 1 curl -fL -o deps\ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip
-  if errorlevel 1 (
-    echo  Telechargement de FFmpeg impossible - verifiez la connexion Internet.
-    goto :err
-  )
-  tar -xf deps\ffmpeg.zip -C deps || goto :err
-  for /d %%D in (deps\ffmpeg-*) do move "%%D" deps\ffmpeg >nul
-  del deps\ffmpeg.zip
-)
-echo [3/6] FFmpeg : OK
-
-rem ---------- 4. Compilation + tests ----------
-echo [4/6] Compilation...
-"%CMAKE%" -S . -B build -A x64 -DFFMPEG_ROOT="%CD%\deps\ffmpeg" %*
+rem ---------- 3. Compilation + tests ----------
+echo [3/5] Compilation...
+"%CMAKE%" -S . -B build -A x64 %*
 if errorlevel 1 goto :err
 "%CMAKE%" --build build --config Release
 if errorlevel 1 goto :err
 "%CTEST%" --test-dir build -C Release --output-on-failure
 if errorlevel 1 goto :err
-echo [4/6] Compilation et tests : OK
+echo [3/5] Compilation et tests : OK
 
-rem ---------- 5. VB-Cable (mode temps reel) ----------
+rem ---------- 4. VB-Cable (mode temps reel) ----------
 set "REBOOT="
 call :hasvbcable
 if defined VBCABLE (
-  echo [5/6] VB-Cable : deja installe
+  echo [4/5] VB-Cable : deja installe
 ) else (
   echo.
   echo  Le mode TEMPS REEL spatialise tout le son de Windows (jeux, films, navigateur^).
@@ -101,8 +82,8 @@ if defined VBCABLE (
   if not errorlevel 2 call :installvbcable
 )
 
-rem ---------- 6. Installation + raccourcis ----------
-echo [6/6] Installation dans %INSTALL%
+rem ---------- 5. Installation + raccourcis ----------
+echo [5/5] Installation dans %INSTALL%
 if not exist "%INSTALL%" mkdir "%INSTALL%"
 rem Une version precedente tourne ? On la ferme (la sortie audio est remise juste apres)
 set "WASRUNNING="
@@ -113,8 +94,10 @@ if not exist build\Release\Spatial3D.exe (echo  Introuvable : build\Release\Spat
 if not exist build\Release\spatial3d-cli.exe (echo  Introuvable : build\Release\spatial3d-cli.exe & goto :err)
 copy /y build\Release\Spatial3D.exe "%INSTALL%\" >nul || (echo  Copie impossible de Spatial3D.exe : fichier utilise ? & goto :err)
 copy /y build\Release\spatial3d-cli.exe "%INSTALL%\" >nul || (echo  Copie impossible de spatial3d-cli.exe : fichier utilise ? & goto :err)
-copy /y build\Release\*.dll "%INSTALL%\" >nul
-copy /y Spatial3D-lancer.bat "%INSTALL%\" >nul
+copy /y build\Release\*.dll "%INSTALL%\" >nul 2>&1
+rem anciennes DLL FFmpeg (versions avec lecteur de fichiers)
+del /q "%INSTALL%\avcodec-*.dll" "%INSTALL%\avformat-*.dll" "%INSTALL%\avutil-*.dll" "%INSTALL%\avfilter-*.dll" "%INSTALL%\avdevice-*.dll" "%INSTALL%\swresample-*.dll" "%INSTALL%\swscale-*.dll" >nul 2>&1
+if exist "%INSTALL%\Spatial3D-lancer.bat" del /q "%INSTALL%\Spatial3D-lancer.bat"
 copy /y Spatial3D-temps-reel.bat "%INSTALL%\" >nul
 copy /y README.md "%INSTALL%\" >nul
 for %%F in (*.sofa) do copy /y "%%F" "%INSTALL%\" >nul
@@ -126,7 +109,6 @@ echo  ==============================================
 echo   Installation terminee
 echo  ==============================================
 echo   Lancez "Spatial3D" depuis le Bureau ou le menu Demarrer.
-echo   Clic droit sur un film ^> Envoyer vers ^> Spatial3D pour le lire en 3D.
 if defined REBOOT (
   echo.
   echo   *** REDEMARREZ l'ordinateur avant d'utiliser le mode temps reel ***
@@ -163,11 +145,6 @@ powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait -FilePath '%VSSE
 call :findvs
 exit /b 0
 
-rem Derniere version stable de FFmpeg chez BtbN (le nom du fichier change a chaque version)
-:ffmpegurl
-set "FFURL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
-for /f "usebackq delims=" %%U in (`powershell -NoProfile -Command "try { $r = Invoke-RestMethod https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest; $a = $r.assets | Where-Object { $_.name -match '^ffmpeg-n[0-9.]+-latest-win64-lgpl-shared-[0-9.]+[.]zip$' } | Sort-Object name -Descending | Select-Object -First 1; if ($a) { $a.browser_download_url } } catch {}"`) do set "FFURL=%%U"
-exit /b 0
 
 :hasvbcable
 set "VBCABLE="
@@ -196,9 +173,9 @@ echo       Acceptez l'autorisation administrateur PUIS l'installation du pilote 
 powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait -FilePath '%VBSETUP%' -ArgumentList '-i','-h'"
 call :hasvbcable
 if defined VBCABLE (
-  echo [5/6] VB-Cable : installe
+  echo [4/5] VB-Cable : installe
 ) else (
-  echo [5/6] VB-Cable : installe - visible apres redemarrage
+  echo [4/5] VB-Cable : installe - visible apres redemarrage
 )
 set "REBOOT=1"
 exit /b 0

@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "dsp.h"
 #include "vbap.h"
+#include "convolver.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -209,86 +210,6 @@ private:
     float rear_ = 0, lp_ = 0, lpA_ = 0.5f;
 };
 
-// HRTF mesurée : convolution FFT (overlap-save) mutualisée pour toutes les sources.
-// Chaque source n'a besoin que d'une FFT directe ; les deux oreilles partagent une seule FFT inverse
-// (oreille gauche en partie réelle, droite en partie imaginaire).
-class Fft {
-public:
-    void init(int n) {
-        n_ = n; tw_.resize(n / 2); rev_.resize(n);
-        for (int i = 0; i < n / 2; ++i) tw_[i] = std::polar(1.f, (float)(-2 * kPi * i / n));
-        int bits = 0; while ((1 << bits) < n) ++bits;
-        for (int i = 0; i < n; ++i) { int r = 0; for (int b = 0; b < bits; ++b) if (i & (1 << b)) r |= 1 << (bits - 1 - b); rev_[i] = r; }
-    }
-    void run(std::complex<float>* a, bool inverse) const {
-        for (int i = 0; i < n_; ++i) if (i < rev_[i]) std::swap(a[i], a[rev_[i]]);
-        for (int len = 2; len <= n_; len <<= 1) {
-            const int half = len / 2, step = n_ / len;
-            for (int i = 0; i < n_; i += len)
-                for (int j = 0; j < half; ++j) {
-                    std::complex<float> w = tw_[j * step];
-                    if (inverse) w = std::conj(w);
-                    const std::complex<float> u = a[i + j], v = a[i + j + half] * w;
-                    a[i + j] = u + v; a[i + j + half] = u - v;
-                }
-        }
-        if (inverse) { const float k = 1.f / n_; for (int i = 0; i < n_; ++i) a[i] *= k; }
-    }
-    int size() const { return n_; }
-private:
-    int n_ = 0;
-    std::vector<std::complex<float>> tw_;
-    std::vector<int> rev_;
-};
-
-class SofaConvolver {
-public:
-    // hl/hr : réponses par source (retard déjà inclus)
-    void init(const std::vector<std::vector<float>>& hl, const std::vector<std::vector<float>>& hr) {
-        size_t N = 1;
-        for (auto& h : hl) N = std::max(N, h.size());
-        for (auto& h : hr) N = std::max(N, h.size());
-        int M = 256; while ((size_t)M / 2 + 1 < N) M <<= 1;
-        M_ = M; B_ = M / 2;
-        fft_.init(M);
-        const size_t S = hl.size();
-        HL_.assign(S, std::vector<std::complex<float>>(M));
-        HR_.assign(S, std::vector<std::complex<float>>(M));
-        for (size_t k = 0; k < S; ++k) {
-            for (size_t i = 0; i < hl[k].size(); ++i) HL_[k][i] = hl[k][i];
-            for (size_t i = 0; i < hr[k].size(); ++i) HR_[k][i] = hr[k][i];
-            fft_.run(HL_[k].data(), false);
-            fft_.run(HR_[k].data(), false);
-        }
-        hist_.assign(S, std::vector<float>(M, 0.f));
-        X_.resize(M); Y_.resize(M);
-    }
-    int block() const { return B_; }
-    // v[k] : B échantillons de la source k ; outLR : B trames stéréo (ajoutées)
-    void processBlock(const std::vector<std::vector<float>>& v, float* outLR) {
-        std::fill(Y_.begin(), Y_.end(), std::complex<float>(0, 0));
-        const std::complex<float> J(0, 1);
-        for (size_t k = 0; k < hist_.size(); ++k) {
-            auto& h = hist_[k];
-            std::copy(h.begin() + B_, h.end(), h.begin());
-            std::copy(v[k].begin(), v[k].begin() + B_, h.begin() + (M_ - B_));
-            for (int i = 0; i < M_; ++i) X_[i] = h[i];
-            fft_.run(X_.data(), false);
-            for (int i = 0; i < M_; ++i) Y_[i] += X_[i] * (HL_[k][i] + J * HR_[k][i]);
-        }
-        fft_.run(Y_.data(), true);
-        for (int n = 0; n < B_; ++n) {
-            outLR[2 * n] += Y_[M_ - B_ + n].real();
-            outLR[2 * n + 1] += Y_[M_ - B_ + n].imag();
-        }
-    }
-private:
-    int M_ = 0, B_ = 0;
-    Fft fft_;
-    std::vector<std::vector<std::complex<float>>> HL_, HR_;
-    std::vector<std::vector<float>> hist_;
-    std::vector<std::complex<float>> X_, Y_;
-};
 
 #ifdef S3D_WITH_MYSOFA
 static int lastAbove(const std::vector<float>& h, float relThr) {
@@ -323,9 +244,11 @@ public:
                 R.insert(R.begin(), (size_t)std::max(0L, std::lround(dr * fs)), 0.f);
                 hl.push_back(std::move(L)); hr.push_back(std::move(R));
             }
-            conv_.init(hl, hr);
+            conv_.init(hl, hr, 128);   // blocs de 128 : 2,7 ms à 48 kHz
             // le convolueur travaille par blocs : latence d'un bloc
             outFifo_.assign((size_t)conv_.block() * 2, 0.f);
+            inFifo_.reserve((size_t)16384 * in_);           // pas d'allocation dans le fil audio
+            outFifo_.reserve((size_t)16384 * 2);
             mysofa_close(easy);
             useSofa_ = true;
             sofaLen_ = len;
@@ -360,7 +283,9 @@ public:
                 mixVirtual(src_[spatial_[k]], inFifo_.data(), B);
                 vk_[k] = v_;
             }
-            conv_.processBlock(vk_, blockOut_.data());
+            vkp_.resize(vk_.size());
+            for (size_t k = 0; k < vk_.size(); ++k) vkp_[k] = vk_[k].data();
+            conv_.processBlock(vkp_.data(), blockOut_.data());
             addLfeAndRoom(inFifo_.data(), blockOut_.data(), B, &vk_);
             inFifo_.erase(inFifo_.begin(), inFifo_.begin() + (size_t)B * in_);
             outFifo_.insert(outFifo_.end(), blockOut_.begin(), blockOut_.end());
@@ -398,6 +323,7 @@ public:
         for (auto& m : mono_) m *= sendNorm;
         room_.process(mono_.data(), out, frames, (float)opt_.room);
     }
+    int latencyFrames() const override { return useSofa_ ? conv_.block() : 0; }
     std::string describe() const override {
         std::ostringstream ss;
         ss << "Rendu casque binaural (" << (useSofa_ ? "HRTF mesuree SOFA, " + std::to_string(sofaLen_) + " points, latence " + std::to_string(conv_.block()) + " ech." : std::string("HRTF parametrique tete spherique"))
@@ -423,7 +349,8 @@ private:
     RenderOptions opt_;
     std::vector<int> spatial_, lfe_;
     std::vector<std::pair<ParamEar, ParamEar>> param_;
-    SofaConvolver conv_;
+    PartitionedConvolver conv_;
+    std::vector<const float*> vkp_;
     bool useSofa_ = false;
     int sofaLen_ = 0;
     RoomReverb room_;

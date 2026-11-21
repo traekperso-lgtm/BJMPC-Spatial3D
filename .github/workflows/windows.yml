@@ -1,4 +1,4 @@
-# Compile Spatial3D pour Windows à chaque push et publie un zip prêt à l'emploi
+# Compile Spatial3D pour Windows à chaque push (sans FFmpeg : moteur temps réel seul) et publie un zip prêt à l'emploi
 # (onglet Actions > dernière exécution > Artifacts > Spatial3D-win64)
 name: Windows
 
@@ -16,21 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: FFmpeg (BtbN, LGPL, DLL)
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Derniere version stable disponible (le nom des fichiers change a chaque version de FFmpeg)
-          $rel = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest
-          $asset = $rel.assets | Where-Object { $_.name -match '^ffmpeg-n[\d.]+-latest-win64-lgpl-shared-[\d.]+\.zip$' } |
-                   Sort-Object name -Descending | Select-Object -First 1
-          if (-not $asset) { $asset = $rel.assets | Where-Object { $_.name -eq 'ffmpeg-master-latest-win64-lgpl-shared.zip' } }
-          Write-Host "FFmpeg : $($asset.name)"
-          Invoke-WebRequest $asset.browser_download_url -OutFile ffmpeg.zip
-          Expand-Archive ffmpeg.zip -DestinationPath deps
-          Get-ChildItem deps -Directory | Select-Object -First 1 | Rename-Item -NewName ffmpeg
-
       - name: libmysofa (HRTF mesurées)
         run: vcpkg install libmysofa:x64-windows
 
@@ -38,7 +23,6 @@ jobs:
         shell: pwsh
         run: >
           cmake -S . -B build -A x64
-          -DFFMPEG_ROOT="${{ github.workspace }}/deps/ffmpeg"
           -DS3D_WITH_MYSOFA=ON
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
@@ -52,10 +36,12 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item build/Release/Spatial3D.exe, build/Release/spatial3d-cli.exe, build/Release/*.dll dist/
+          Copy-Item build/Release/Spatial3D.exe, build/Release/spatial3d-cli.exe dist/
+          Copy-Item build/Release/*.dll dist/ -ErrorAction SilentlyContinue
           Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -Recurse -Filter *.sofa |
             Copy-Item -Destination dist/
-          Copy-Item README.md, Spatial3D-lancer.bat, Spatial3D-temps-reel.bat dist/
+          Copy-Item README.md, Spatial3D-temps-reel.bat dist/
+          "Taille du paquet : {0:N1} Mo" -f ((Get-ChildItem dist -Recurse | Measure-Object Length -Sum).Sum / 1MB)
 
       - uses: actions/upload-artifact@v4
         with:

@@ -56,8 +56,9 @@ int runLive(const LiveArgs& a, std::atomic<bool>& stop) {
         saveSettings(s);
     }
     s.layout = a.sortie; s.sofaPath = a.sofa; s.spreadDeg = a.spread; s.room = a.room; s.gainDb = a.gainDb;
-    if (a.latencyMs != 10) s.marginMs = a.latencyMs;      // sinon : marge apprise mémorisée
+    if (a.latencyMs != 6) s.marginMs = a.latencyMs;      // sinon : marge apprise mémorisée
     s.keepDefault = a.keepDefault; s.exclusive = s.exclusive || a.exclusive;
+    if (a.standardLatency) s.lowLatency = false;
 
     LiveEngine eng;
     if (!eng.start(s, err)) { fprintf(stderr, "Erreur : %s\n", err.c_str()); return 1; }
@@ -66,7 +67,14 @@ int runLive(const LiveArgs& a, std::atomic<bool>& stop) {
     if (!eng.status().warning.empty()) printf("ATTENTION : %s\n", eng.status().warning.c_str());
     if (!s.keepDefault) printf("Sortie par defaut de Windows : VB-Cable (remise a la fermeture)\n");
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    if (!eng.status().outputMode.empty()) printf("Sortie WASAPI : %s\n", eng.status().outputMode.c_str());
+    {
+        const auto st0 = eng.status();
+        if (!st0.captureMode.empty()) printf("Capture WASAPI : %s\n", st0.captureMode.c_str());
+        if (!st0.outputMode.empty()) printf("Sortie WASAPI : %s\n", st0.outputMode.c_str());
+        if (st0.totalLatencyMs > 0)
+            printf("Latence estimee : %.1f ms (capture %.1f + marge %.0f + traitement %.1f + sortie %.1f)\n", st0.totalLatencyMs,
+                   st0.capturePeriodMs, st0.marginMs, st0.processingMs, st0.outputBufferMs);
+    }
     printf("Spatialisation en direct... (Ctrl+C ou fermer la fenetre pour arreter)\n");
     while (!stop && eng.running()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));

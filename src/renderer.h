@@ -28,6 +28,7 @@ public:
     // in : frames x inChannels entrelacés ; out : frames x outChannels entrelacés (écrasé)
     virtual void process(const float* in, float* out, size_t frames) = 0;
     virtual std::string describe() const = 0;
+    virtual int latencyFrames() const { return 0; }   // retard algorithmique introduit
 };
 
 std::unique_ptr<Renderer> makeRenderer(const std::vector<VirtualSource>& sources, int inChannels,

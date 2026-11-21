@@ -12,9 +12,10 @@ struct LiveArgs {
     std::string sortie = "auto";  // disposition forcée
     std::string sofa;
     double spread = 0, room = -1, gainDb = 0;
-    int latencyMs = 10;           // marge initiale (augmente seule après une coupure)
+    int latencyMs = 6;            // marge initiale (augmente seule après une coupure)
     bool keepDefault = false;     // ne pas basculer la sortie par défaut de Windows sur VB-Cable
     bool exclusive = false;       // sortie WASAPI exclusive
+    bool standardLatency = false; // désactive la période WASAPI minimale
 };
 
 int runLive(const LiveArgs& a, std::atomic<bool>& stop);

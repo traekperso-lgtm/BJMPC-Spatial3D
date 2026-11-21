@@ -1,4 +1,4 @@
-// Spatial3D — moteurs pilotables (Windows) : temps réel et lecteur de fichiers.
+// Spatial3D — moteur temps réel pilotable (Windows).
 // Utilisés par l'interface graphique et par la ligne de commande.
 #pragma once
 #include "model.h"
@@ -42,7 +42,9 @@ public:
         bool running = false, idle = true;
         double marginMs = 0, lowMs = 0, driftPpm = 0, inHz = 0;
         int underruns = 0, drops = 0, captureGlitches = 0;
-        std::string error, warning, outputMode;
+        std::string error, warning, outputMode, captureMode;
+        // latence bout en bout estimée : capture + marge + traitement + limiteur + tampon de sortie
+        double capturePeriodMs = 0, processingMs = 0, outputBufferMs = 0, totalLatencyMs = 0;
     };
     LiveEngine();
     ~LiveEngine();
@@ -59,35 +61,6 @@ private:
     struct Impl;
     std::unique_ptr<Impl> d_;
     std::atomic<bool> running_{ false };
-    std::atomic<float> gain_{ 1.f };
-};
-
-// ---------------------------------------------------------------------------------------------
-class FilePlayer {
-public:
-    FilePlayer();
-    ~FilePlayer();
-    FilePlayer(const FilePlayer&) = delete;
-    FilePlayer& operator=(const FilePlayer&) = delete;
-    bool open(const std::string& pathUtf8, const Settings& s, std::string& err);   // ouvre et joue
-    void close();
-    void togglePause() { paused_ = !paused_; }
-    bool paused() const { return paused_; }
-    void seek(double seconds) { seekTo_ = seconds; }
-    double position() const { return pos_; }
-    double duration() const { return duration_; }
-    bool active() const { return active_; }        // ouvert (en lecture ou en pause)
-    bool finished() const { return finished_; }
-    std::string info() const;
-    std::string error() const;
-    Scene scene() const;
-    void setGainDb(double db) { gain_ = (float)std::pow(10.0, db / 20.0); }
-    Meters meters;
-private:
-    struct Impl;
-    std::unique_ptr<Impl> d_;
-    std::atomic<bool> paused_{ false }, active_{ false }, finished_{ false };
-    std::atomic<double> seekTo_{ -1 }, pos_{ 0 }, duration_{ 0 };
     std::atomic<float> gain_{ 1.f };
 };
 

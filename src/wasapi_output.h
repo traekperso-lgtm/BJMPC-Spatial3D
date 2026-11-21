@@ -32,18 +32,23 @@ using PullFn = std::function<size_t(float* dst, size_t frames)>;
 struct PlayOptions {
     int bufferMs = 20;          // mode partagé
     bool exclusive = false;     // mode exclusif : la carte son pour nous seuls, sans mélangeur Windows
+    bool lowLatency = true;     // période minimale : IAudioClient3 en partagé, période mini en exclusif
 };
+// `bufferFrames` (facultatif) reçoit la taille du tampon de sortie obtenu.
 // `modeInfo` (facultatif) reçoit le mode réellement obtenu, ex. « exclusif, 24 bits, 10.0 ms ».
 // Si l'exclusif est refusé (périphérique occupé, format), repli automatique en partagé.
 bool playWasapi(const std::wstring& id, int channels, uint32_t channelMask, int rate, const PlayOptions& opt,
-                const PullFn& pull, std::atomic<bool>& stop, std::string& err, std::string* modeInfo = nullptr);
+                const PullFn& pull, std::atomic<bool>& stop, std::string& err, std::string* modeInfo = nullptr,
+                int* bufferFrames = nullptr);
 
 // Capture partagée au format de mixage du périphérique (float 32 bits)
 class WasapiCapture {
 public:
     WasapiCapture();
     ~WasapiCapture();
-    bool open(const std::wstring& id, int bufferMs, std::string& err);
+    bool open(const std::wstring& id, int bufferMs, std::string& err, bool lowLatency = true);
+    double periodMs() const;     // période de capture obtenue
+    std::string modeInfo() const;
     int channels() const;
     int rate() const;
     uint32_t mask() const;

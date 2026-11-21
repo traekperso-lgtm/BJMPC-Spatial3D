@@ -1,8 +1,18 @@
 #include "dsp.h"
 #include <algorithm>
 #include <cmath>
+#if defined(__SSE__) || defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__)
+#include <xmmintrin.h>
+#define S3D_HAS_SSE 1
+#endif
 
 namespace s3d {
+
+void enableFlushToZero() {
+#ifdef S3D_HAS_SSE
+    _mm_setcsr(_mm_getcsr() | 0x8040);   // FTZ (bit 15) + DAZ (bit 6)
+#endif
+}
 
 void RoomReverb::init(double fs, double rt60, double predelayMs) {
     // Longueurs premières entre elles (ms) : densité d'échos sans coloration marquée
@@ -52,7 +62,7 @@ void Limiter::init(double fs, int channels, float thr, double releaseMs, double 
     L_ = std::max(1, (int)std::lround(lookaheadMs * 1e-3 * fs));
     delay_.assign((size_t)(L_ - 1) * ch_, 0.f);
     dpos_ = 0;
-    minq_.clear(); minHead_ = 0;
+    minq_.clear(); minq_.reserve(4096 + (size_t)L_ + 16); minHead_ = 0;
     avg_.assign((size_t)L_, 1.f);
     apos_ = 0; avgSum_ = L_;
     n_ = 0;

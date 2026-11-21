@@ -5,29 +5,31 @@
 // les paquets), et la marge de sécurité grandit automatiquement après une coupure.
 #pragma once
 #include <cstddef>
-#include <mutex>
+#include <atomic>
 #include <vector>
 
 namespace s3d {
 
-// File d'attente multicanal protégée (fil de capture -> fil de rendu)
-class FrameQueue {
+// Tampon circulaire sans verrou, un producteur (capture) / un consommateur (rendu) :
+// aucun des deux fils n'attend jamais l'autre, aucune allocation après init().
+class SpscRing {
 public:
-    void init(int channels) { ch_ = channels; }
-    void push(const float* x, size_t frames);
-    void pushSilence(size_t frames);
-    void drainTo(std::vector<float>& dst);   // transfère tout le contenu (ajouté à la fin)
+    void init(size_t capacityFloats);
+    size_t push(const float* x, size_t n);    // renvoie le nombre écrit (le surplus est perdu si plein)
+    size_t pop(float* dst, size_t max);       // renvoie le nombre lu
+    size_t available() const;
 private:
-    int ch_ = 2;
-    std::mutex m_;
-    std::vector<float> q_;
+    std::vector<float> buf_;
+    size_t mask_ = 0;
+    std::atomic<size_t> head_{ 0 }, tail_{ 0 };   // head : écriture, tail : lecture
 };
 
 // Rééchantillonneur multicanal à rapport variable (interpolation d'Hermite)
 class AdaptiveResampler {
 public:
-    void init(int channels);
+    void init(int channels, size_t capacityFrames = 192000);   // mémoire réservée d'avance
     void push(const std::vector<float>& interleaved);
+    void push(const float* interleaved, size_t frames);
     double available() const;               // trames d'entrée non consommées
     // Produit `frames` trames ; `ratio` = trames d'entrée consommées par trame de sortie.
     size_t pull(float* out, size_t frames, double ratio);
@@ -68,6 +70,7 @@ class LiveInputStage {
 public:
     void init(int channels, double inRate, double outRate, int marginMs);
     void feed(const std::vector<float>& interleaved) { rs_.push(interleaved); }
+    void feed(const float* interleaved, size_t frames) { rs_.push(interleaved, frames); }
     // Remplit `frames` trames d'entrée ; sourceIdle = aucune donnée reçue récemment (pas une coupure)
     void produce(float* out, size_t frames, bool sourceIdle);
     const DriftController& controller() const { return dc_; }

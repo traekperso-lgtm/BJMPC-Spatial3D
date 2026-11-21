@@ -1,7 +1,7 @@
 // Spatial3D — spatialisation 3D pour Windows
 // Lit un fichier audio, détecte la configuration de sortie de Windows (stéréo, 5.1, 7.1, 7.1.4, casque)
 // et place chaque son au meilleur endroit : VBAP sur haut-parleurs, HRTF au casque.
-#include "decoder.h"
+#include "wav_reader.h"
 #include "dsp.h"
 #include "layout.h"
 #include "renderer.h"
@@ -31,7 +31,7 @@
 
 using namespace s3d;
 
-static const char* kVersion = "0.4.1";
+static const char* kVersion = "0.5.0";
 static std::atomic<bool> gStop{ false };
 
 #ifdef _WIN32
@@ -51,13 +51,14 @@ struct Args {
     bool forceAmbi = false, infoOnly = false, help = false, list = false;
     bool live = false, devices = false, configCable = false, restore = false, keepDefault = false, exclusive = false;
     std::string inName, outName;
-    double latency = 10;
+    double latency = 6;
+    bool standardLatency = false;
 };
 
 static void usage() {
     printf(
         "Spatial3D %s - spatialisation 3D (BJMPC Informatique)\n\n"
-        "Usage : spatial3d-cli <fichier> [options]      lecture d'un fichier\n"
+        "Usage : spatial3d-cli <fichier.wav> [options]  lecture d'un fichier WAV\n"
         "        spatial3d-cli --temps-reel [options]   son de Windows en direct (via VB-Cable)\n"
         "(interface graphique : Spatial3D.exe)\n\n"
         "  --sortie <disposition>  auto (defaut : configuration Windows), casque, 2.0, 2.1, 3.0,\n"
@@ -74,9 +75,10 @@ static void usage() {
         "  --temps-reel            capte VB-Cable (7.1) et spatialise vers la vraie sortie\n"
         "  --vers <nom>            vraie sortie (partie du nom ; memorisee pour la suite)\n"
         "  --entree <nom>          autre entree que VB-Cable\n"
-        "  --latence <ms>          marge initiale (defaut 10, augmente seule si coupure)\n"
+        "  --latence <ms>          marge initiale (defaut 6, augmente seule si coupure)\n"
         "  --garder-sortie         ne pas basculer la sortie par defaut de Windows sur VB-Cable\n"
         "  --exclusif              sortie WASAPI exclusive (latence minimale, sans melangeur Windows)\n"
+        "  --latence-standard      periodes WASAPI de 10 ms (si le pilote supporte mal la faible latence)\n"
         "  --peripheriques         liste les sorties et entrees audio\n"
         "  --configurer-cable      regle VB-Cable en 7.1\n"
         "  --restaurer             remet la vraie sortie par defaut (apres un plantage)\n", kVersion);
@@ -103,6 +105,7 @@ static bool parse(int argc, char** argv, Args& a, std::string& err) {
         else if (s == "--latence") { if (!nextD(a.latency)) return false; }
         else if (s == "--garder-sortie") a.keepDefault = true;
         else if (s == "--exclusif") a.exclusive = true;
+        else if (s == "--latence-standard") a.standardLatency = true;
         else if (s == "--peripheriques" || s == "--devices") a.devices = true;
         else if (s == "--configurer-cable") a.configCable = true;
         else if (s == "--restaurer") a.restore = true;
@@ -131,6 +134,7 @@ int run(int argc, char** argv) {
         la.inputName = a.inName; la.outputName = a.outName; la.sortie = a.sortie; la.sofa = a.sofa;
         la.spread = a.spread >= 0 ? std::min(a.spread, 90.0) : 0; la.room = a.room; la.gainDb = a.gainDb;
         la.latencyMs = (int)a.latency; la.keepDefault = a.keepDefault; la.exclusive = a.exclusive;
+        la.standardLatency = a.standardLatency;
         return runLive(la, gStop);
     }
 #else
@@ -142,6 +146,7 @@ int run(int argc, char** argv) {
     Layout out;
     int deviceRate = 0;
     const bool play = a.wavOut.empty();
+    (void)play;
     if (a.sortie == "auto") {
 #ifdef _WIN32
         Endpoint dev;
@@ -168,13 +173,15 @@ int run(int argc, char** argv) {
 #endif
 
     // ---- 2. Lecture du fichier source ----
-    Decoder dec;
-    if (!dec.open(a.input, play ? deviceRate : 0, err)) { fprintf(stderr, "Erreur : %s\n", err.c_str()); return 1; }
+    // Windows rééchantillonne au besoin (AUTOCONVERTPCM) : le fichier est lu à sa fréquence d'origine
+    (void)deviceRate;
+    WavReader dec;
+    if (!dec.open(a.input, err)) { fprintf(stderr, "Erreur : %s\n", err.c_str()); return 1; }
     const int rate = dec.sampleRate();
     printf("Source : %s\n", dec.info().c_str());
 
     std::vector<VirtualSource> sources;
-    const bool ambi = a.forceAmbi || dec.ambisonic();
+    const bool ambi = a.forceAmbi;
     if (ambi) {
         const int order = ambisonicOrderForChannels(dec.channels());
         if (order < 1) { fprintf(stderr, "Erreur : %d canaux ne correspondent a aucun ordre ambisonique\n", dec.channels()); return 1; }
@@ -238,7 +245,7 @@ int run(int argc, char** argv) {
     } else {
 #ifdef _WIN32
         printf("Lecture... (Ctrl+C pour arreter)\n");
-        if (!playWasapi(L"", outCh, mask32, rate, PlayOptions{ 200, false }, pull, gStop, err)) { fprintf(stderr, "\nErreur : %s\n", err.c_str()); return 1; }
+        if (!playWasapi(L"", outCh, mask32, rate, PlayOptions{ 200, false, false }, pull, gStop, err)) { fprintf(stderr, "\nErreur : %s\n", err.c_str()); return 1; }
         printf("\n%s\n", gStop ? "Arrete." : "Termine.");
 #endif
     }

@@ -1,5 +1,4 @@
 #include "engine.h"
-#include "decoder.h"
 #include "dsp.h"
 #include "live_core.h"
 #include "renderer.h"
@@ -71,9 +70,10 @@ Settings loadSettings() {
     s.spreadDeg = num("etalement", 0);
     s.room = num("piece", -1);
     s.gainDb = num("volume", 0);
-    s.marginMs = (int)num("marge", 10);
+    s.marginMs = (int)num("marge", 6);
     s.keepDefault = flag("garder_sortie", false);
     s.exclusive = flag("exclusif", false);
+    s.lowLatency = flag("faible_latence", true);
     s.liveOnLaunch = flag("temps_reel_au_lancement", false);
     s.closeToTray = flag("fermer_dans_zone_notif", true);
     s.startWithWindows = flag("demarrer_avec_windows", false);
@@ -91,6 +91,7 @@ void saveSettings(const Settings& s) {
       << "marge=" << s.marginMs << "\n"
       << "garder_sortie=" << (s.keepDefault ? 1 : 0) << "\n"
       << "exclusif=" << (s.exclusive ? 1 : 0) << "\n"
+      << "faible_latence=" << (s.lowLatency ? 1 : 0) << "\n"
       << "temps_reel_au_lancement=" << (s.liveOnLaunch ? 1 : 0) << "\n"
       << "fermer_dans_zone_notif=" << (s.closeToTray ? 1 : 0) << "\n"
       << "demarrer_avec_windows=" << (s.startWithWindows ? 1 : 0) << "\n";
@@ -216,14 +217,18 @@ struct LiveEngine::Impl {
     Endpoint cableIn, cableOut, outEp;
     std::unique_ptr<Renderer> renderer;
     Scene scene;
-    FrameQueue queue;
+    SpscRing ring;                         // capture -> rendu, sans verrou
+    std::promise<void> go;                 // la capture démarre une fois le moteur prêt
+    std::atomic<int> ringOverflow{ 0 };
     LiveInputStage stage;
     Limiter lim;
     std::thread capThread, renderThread;
     std::atomic<bool> stop{ false }, capStop{ false }, idle{ true };
     std::atomic<long long> lastDataMs{ -100000 }, capturedFrames{ 0 };
     std::atomic<int> underruns{ 0 }, drops{ 0 }, capGlitches{ 0 };
-    std::string outputMode;
+    std::string outputMode, captureMode;
+    double capPeriodMs = 10, procMs = 0;
+    std::atomic<double> outBufMs{ 0 };
     std::atomic<double> lowMs{ 0 }, marginMs{ 0 }, driftPpm{ 0 };
     bool switched = false;
     int capCh = 0, capRate = 48000; uint32_t capMask = 0;
@@ -232,7 +237,7 @@ struct LiveEngine::Impl {
     std::string error, warning;
     mutable long long lastFrames = 0, lastT = 0;
     mutable double inHz = 0;
-    std::vector<float> incoming, inBuf;
+    std::vector<float> incoming, inBuf;      // préalloués avant le démarrage du rendu
 
     long long nowMs() const { return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count(); }
     void setError(const std::string& e) { std::lock_guard<std::mutex> lk(m); if (error.empty()) error = e; }
@@ -268,13 +273,20 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
         auto& d = *d_;
         WasapiCapture cap;
         std::string e;
-        if (!cap.open(d.cableOut.id, 20, e)) { opened.set_value(e); return; }
+        if (!cap.open(d.cableOut.id, 20, e, d.set.lowLatency)) { opened.set_value(e); return; }
         d.capCh = cap.channels(); d.capRate = cap.rate(); d.capMask = cap.mask();
+        d.capPeriodMs = cap.periodMs();
+        { char b[96]; snprintf(b, sizeof b, "%s, période %.1f ms", cap.modeInfo().c_str(), d.capPeriodMs); d.captureMode = b; }
+        auto goF = d.go.get_future();
         opened.set_value("");
+        goF.wait();                                // tampon et moteur prêts
+        if (d.capStop) return;
+        enableFlushToZero();
         std::string runErr;
+        const int ch = d.capCh;
         cap.run([&](const float* x, size_t n, bool, bool discontinuity) {
             if (discontinuity) ++d.capGlitches;
-            d.queue.push(x, n);
+            if (d.ring.push(x, n * ch) < n * ch) ++d.ringOverflow;
             d.capturedFrames += (long long)n;
             d.lastDataMs = d.nowMs();
         }, d.capStop, runErr);
@@ -297,17 +309,20 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     const RenderOptions opt = optionsFor(s, outL);
     const int outRate = d.outEp.mixRate;
     d.renderer = makeRenderer(sources, d.capCh, outL, outRate, opt, err);
-    if (!d.renderer) { d.capStop = true; d.capThread.join(); return false; }
+    if (!d.renderer) { d.capStop = true; d.go.set_value(); d.capThread.join(); return false; }
     d.scene = makeScene(sources, d.capCh, outL, opt);
     d.scene.inIds = ids;
     d.scene.inputName = d.cableOut.name;
     d.scene.outputName = d.outEp.name;
     d.scene.plan = d.renderer->describe();
 
-    d.queue.init(d.capCh);
+    d.ring.init((size_t)d.capRate * d.capCh);        // 1 seconde de marge
+    d.incoming.assign((size_t)d.capRate * d.capCh, 0.f);
+    d.inBuf.assign((size_t)16384 * d.capCh, 0.f);
     d.stage.init(d.capCh, d.capRate, outRate, std::clamp(s.marginMs, 5, 200));
     d.marginMs = d.stage.controller().marginMs();
     d.lim.init(outRate, d.renderer->outChannels());
+    d.procMs = 1000.0 * (d.renderer->latencyFrames() + d.lim.latencyFrames()) / outRate;
     setGainDb(s.gainDb);
 
     if (!s.keepDefault) {
@@ -319,13 +334,15 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     const int outCh = d.renderer->outChannels();
     const uint32_t outMask = (uint32_t)(outL.mask() & 0xFFFFFFFFu);
     running_ = true;
+    d.go.set_value();
     d.renderThread = std::thread([this, outCh, outMask, outRate] {
         auto& d = *d_;
+        bool ftz = true;
         auto pull = [&](float* dst, size_t frames) -> size_t {
-            d.incoming.clear();
-            d.queue.drainTo(d.incoming);
-            if (!d.incoming.empty()) d.stage.feed(d.incoming);
-            d.inBuf.resize(frames * d.capCh);
+            if (ftz) { ftz = false; enableFlushToZero(); }
+            const size_t got = d.ring.pop(d.incoming.data(), d.incoming.size());
+            if (got) d.stage.feed(d.incoming.data(), got / d.capCh);
+            if (frames * d.capCh > d.inBuf.size()) d.inBuf.resize(frames * d.capCh);
             const bool sourceIdle = d.nowMs() - d.lastDataMs.load() > 100;
             d.idle = sourceIdle;
             d.stage.produce(d.inBuf.data(), frames, sourceIdle);
@@ -341,13 +358,14 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
             return frames;
         };
         std::string e, mode;
-        PlayOptions po; po.bufferMs = 20; po.exclusive = d.set.exclusive;
+        PlayOptions po; po.bufferMs = 20; po.exclusive = d.set.exclusive; po.lowLatency = d.set.lowLatency;
+        int bufFrames = 0;
         bool first = true;
         auto pullAndReport = [&](float* dst, size_t frames) -> size_t {
-            if (first) { first = false; std::lock_guard<std::mutex> lk(d.m); d.outputMode = mode; }
+            if (first) { first = false; d.outBufMs = 1000.0 * bufFrames / outRate; std::lock_guard<std::mutex> lk(d.m); d.outputMode = mode; }
             return pull(dst, frames);
         };
-        playWasapi(d.outEp.id, outCh, outMask, outRate, po, pullAndReport, d.stop, e, &mode);
+        playWasapi(d.outEp.id, outCh, outMask, outRate, po, pullAndReport, d.stop, e, &mode, &bufFrames);
         if (!e.empty()) d.setError(e);
         d.capStop = true;
         running_ = false;
@@ -378,6 +396,9 @@ LiveEngine::Status LiveEngine::status() const {
     st.captureGlitches = d.capGlitches;
     std::lock_guard<std::mutex> lk(d.m);
     st.outputMode = d.outputMode;
+    st.captureMode = d.captureMode;
+    st.capturePeriodMs = d.capPeriodMs; st.processingMs = d.procMs; st.outputBufferMs = d.outBufMs;
+    st.totalLatencyMs = st.outputBufferMs > 0 ? st.capturePeriodMs + st.marginMs + st.processingMs + st.outputBufferMs : 0;
     const long long f = d.capturedFrames.load(), t = d.nowMs();
     if (t - d.lastT >= 1000) {
         const double hz = (f - d.lastFrames) * 1000.0 / (double)(t - d.lastT);
@@ -390,117 +411,5 @@ LiveEngine::Status LiveEngine::status() const {
 }
 
 Scene LiveEngine::scene() const { return d_ ? d_->scene : Scene{}; }
-
-// =============================================================================================
-//  Lecteur de fichiers
-// =============================================================================================
-struct FilePlayer::Impl {
-    Decoder dec;
-    std::unique_ptr<Renderer> renderer;
-    Limiter lim;
-    Scene scene;
-    std::thread th;
-    std::atomic<bool> stop{ false };
-    std::string info;
-    mutable std::mutex m;
-    std::string error;
-    std::vector<float> inBuf;
-    int rate = 48000;
-};
-
-FilePlayer::FilePlayer() = default;
-FilePlayer::~FilePlayer() { close(); }
-
-void FilePlayer::close() {
-    if (!d_) return;
-    d_->stop = true;
-    if (d_->th.joinable()) d_->th.join();
-    d_.reset();
-    active_ = false; finished_ = false; paused_ = false; pos_ = 0; duration_ = 0;
-    meters.reset();
-}
-
-bool FilePlayer::open(const std::string& path, const Settings& s, std::string& err) {
-    close();
-    d_ = std::make_unique<Impl>();
-    auto& d = *d_;
-    Endpoint outEp;
-    if (!resolveOutput(s, outEp, err)) return false;
-    const Layout outL = layoutFor(s, outEp);
-    if (!d.dec.open(path, outEp.mixRate, err)) return false;
-    d.rate = d.dec.sampleRate();
-    std::vector<VirtualSource> sources;
-    if (d.dec.ambisonic() && ambisonicOrderForChannels(d.dec.channels()) > 0)
-        sources = sourcesFromAmbisonics(d.dec.channels(), ambisonicOrderForChannels(d.dec.channels()));
-    else
-        sources = sourcesFromChannels(d.dec.channelIds());
-    const RenderOptions opt = optionsFor(s, outL);
-    d.renderer = makeRenderer(sources, d.dec.channels(), outL, d.rate, opt, err);
-    if (!d.renderer) return false;
-    d.scene = makeScene(sources, d.dec.channels(), outL, opt);
-    if (!(d.dec.ambisonic() && ambisonicOrderForChannels(d.dec.channels()) > 0)) d.scene.inIds = d.dec.channelIds();
-    d.scene.inputName = d.dec.info();
-    d.scene.outputName = outEp.name;
-    d.scene.plan = d.renderer->describe();
-    d.info = d.dec.info();
-    duration_ = d.dec.durationSec();
-    const int outCh = d.renderer->outChannels(), inCh = d.dec.channels();
-    d.lim.init(d.rate, outCh);
-    setGainDb(s.gainDb);
-    paused_ = false; finished_ = false; pos_ = 0;
-    active_ = true;
-    const uint32_t mask = (uint32_t)(outL.mask() & 0xFFFFFFFFu);
-    const std::wstring outId = outEp.id;
-    d.th = std::thread([this, outCh, inCh, mask, outId] {
-        auto& d = *d_;
-        // Fondu de 5 ms à chaque pause, reprise ou déplacement : pas de clic
-        const int F = std::max(32, d.rate / 200);
-        float fade = 0.f;                 // gain courant du fondu
-        auto pull = [&](float* dst, size_t frames) -> size_t {
-            std::fill(dst, dst + frames * outCh, 0.f);
-            const double sk = seekTo_.load();
-            const bool silence = paused_ || finished_ || sk >= 0;
-            if (silence && fade <= 0.f) {
-                if (sk >= 0) { seekTo_ = -1; d.dec.seek(sk); pos_ = sk; finished_ = false; }
-                return frames;
-            }
-            // en fondu de sortie, on ne lit que ce qui est audible
-            const size_t want = silence ? std::min<size_t>(frames, (size_t)F) : frames;
-            size_t produced = 0;
-            while (produced < want) {
-                const size_t chunk = std::min<size_t>(want - produced, 2048);
-                d.inBuf.resize(chunk * inCh);
-                const size_t got = d.dec.read(d.inBuf.data(), chunk);
-                if (!got) { finished_ = true; paused_ = true; break; }
-                Meters::feed(meters.in, d.inBuf.data(), got, inCh);
-                float* o = dst + produced * outCh;
-                d.renderer->process(d.inBuf.data(), o, got);
-                produced += got;
-            }
-            const float target = silence ? 0.f : 1.f, step = 1.f / F;
-            const float g = gain_.load();
-            for (size_t i = 0; i < frames; ++i) {
-                if (fade < target) fade = std::min(target, fade + step);
-                else if (fade > target) fade = std::max(target, fade - step);
-                const float k = fade * g;
-                for (int c = 0; c < outCh; ++c) dst[i * outCh + c] *= k;
-            }
-            d.lim.process(dst, frames);
-            Meters::feed(meters.out, dst, produced, outCh);
-            pos_ = pos_.load() + (double)produced / d.rate;
-            return frames;
-        };
-        std::string e;
-        PlayOptions po; po.bufferMs = 100;
-        playWasapi(outId, outCh, mask, d.rate, po, pull, d.stop, e);
-        if (!e.empty()) { std::lock_guard<std::mutex> lk(d.m); d.error = e; }
-        active_ = false;
-    });
-    return true;
-}
-
-std::string FilePlayer::info() const { return d_ ? d_->info : std::string(); }
-std::string FilePlayer::error() const { if (!d_) return {}; std::lock_guard<std::mutex> lk(d_->m); return d_->error; }
-Scene FilePlayer::scene() const { return d_ ? d_->scene : Scene{}; }
 
 } // namespace s3d

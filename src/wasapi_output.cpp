@@ -26,6 +26,7 @@ namespace s3d {
 static const GUID kCLSID_MMDeviceEnumerator = { 0xBCDE0395, 0xE52F, 0x467C, { 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E } };
 static const GUID kIID_IMMDeviceEnumerator  = { 0xA95664D2, 0x9614, 0x4F35, { 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6 } };
 static const GUID kIID_IAudioClient         = { 0x1CB9AD4C, 0xDBFA, 0x4C32, { 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2 } };
+static const GUID kIID_IAudioClient3        = { 0x7ED4EE07, 0x8E67, 0x4CD4, { 0x8C, 0x1A, 0x2B, 0x7A, 0x59, 0x87, 0xAD, 0x42 } };
 static const GUID kIID_IAudioRenderClient   = { 0xF294ACFC, 0x3146, 0x4483, { 0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2 } };
 static const GUID kIID_IAudioCaptureClient  = { 0xC8ADBD64, 0xE71E, 0x48A0, { 0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17 } };
 static const GUID kSUBTYPE_IEEE_FLOAT       = { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
@@ -51,6 +52,17 @@ struct IPolicyConfig : public IUnknown {
     virtual HRESULT STDMETHODCALLTYPE SetPropertyValue(PCWSTR, BOOL, const PROPERTYKEY&, PROPVARIANT*) = 0;
     virtual HRESULT STDMETHODCALLTYPE SetDefaultEndpoint(PCWSTR, ERole) = 0;
     virtual HRESULT STDMETHODCALLTYPE SetEndpointVisibility(PCWSTR, INT) = 0;
+};
+
+// IAudioClient3 (Windows 10+) déclarée localement : en-têtes MinGW anciens et MSVC identiques.
+// Vtable : IAudioClient, puis IAudioClient2 (3 méthodes), puis IAudioClient3 (3 méthodes).
+struct S3DAudioClient3 : public IAudioClient {
+    virtual HRESULT STDMETHODCALLTYPE IsOffloadCapable(int, BOOL*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetClientProperties(const void*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetBufferSizeLimits(const WAVEFORMATEX*, BOOL, REFERENCE_TIME*, REFERENCE_TIME*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetSharedModeEnginePeriod(const WAVEFORMATEX*, UINT32*, UINT32*, UINT32*, UINT32*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetCurrentSharedModeEnginePeriod(WAVEFORMATEX**, UINT32*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE InitializeSharedAudioStream(DWORD, UINT32, const WAVEFORMATEX*, LPCGUID) = 0;
 };
 
 template <class T> struct ComPtr {
@@ -238,9 +250,31 @@ static void convertOut(const float* src, BYTE* dst, size_t n, const ExclFmt& f, 
     }
 }
 
+// Partagé faible latence (IAudioClient3, Windows 10+) : le moteur audio de Windows tourne à la
+// période minimale que le pilote accepte (souvent 2,7 ms au lieu de 10 ms). Exige le format de mixage.
+static bool initLowLatencyShared(IAudioClient* ac, const WAVEFORMATEX* fmt, UINT32& periodFrames) {
+    S3DAudioClient3* ac3 = nullptr;
+    if (FAILED(ac->QueryInterface(kIID_IAudioClient3, (void**)&ac3)) || !ac3) return false;
+    UINT32 def = 0, fund = 0, mn = 0, mx = 0;
+    bool ok = SUCCEEDED(ac3->GetSharedModeEnginePeriod(fmt, &def, &fund, &mn, &mx)) && mn > 0 && mn < def;
+    if (ok) ok = SUCCEEDED(ac3->InitializeSharedAudioStream(AUDCLNT_STREAMFLAGS_EVENTCALLBACK, mn, fmt, nullptr));
+    if (ok) periodFrames = mn;
+    ac3->Release();
+    return ok;
+}
+
+// Le format demandé est-il exactement le format de mixage (condition d'IAudioClient3) ?
+static bool sameAsMix(const WAVEFORMATEX* mix, int channels, uint32_t mask, int rate) {
+    if (!mix || mix->nChannels != channels || (int)mix->nSamplesPerSec != rate || mix->wBitsPerSample != 32) return false;
+    if (mix->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) return mask == defaultMask(channels);
+    if (mix->wFormatTag != WAVE_FORMAT_EXTENSIBLE || mix->cbSize < 22) return false;
+    auto* x = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(mix);
+    return IsEqualGUID(x->SubFormat, kSUBTYPE_IEEE_FLOAT) && x->dwChannelMask == mask;
+}
+
 // Mode exclusif : choix du format (float 32, 24 dans 32, 24, 16) et de la période matérielle
 static bool initExclusive(IMMDevice* dev, ComPtr<IAudioClient>& ac, int channels, uint32_t mask, int rate,
-                          ExclFmt& chosen, HANDLE ev, std::string& why) {
+                          ExclFmt& chosen, HANDLE ev, bool minPeriod, std::string& why) {
     static const ExclFmt cands[] = { { 32, 32, true }, { 32, 24, false }, { 24, 24, false }, { 16, 16, false } };
     bool found = false;
     WAVEFORMATEXTENSIBLE wf{};
@@ -251,6 +285,7 @@ static bool initExclusive(IMMDevice* dev, ComPtr<IAudioClient>& ac, int channels
     if (!found) { why = "format " + std::to_string(channels) + " canaux / " + std::to_string(rate) + " Hz refuse en exclusif"; return false; }
     REFERENCE_TIME def = 0, mn = 0;
     ac->GetDevicePeriod(&def, &mn);
+    if (minPeriod && mn > 0) def = mn;               // période matérielle minimale
     if (def <= 0) def = 100000;
     HRESULT hr = ac->Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, def, def, (WAVEFORMATEX*)&wf, nullptr);
     if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
@@ -271,7 +306,8 @@ static bool initExclusive(IMMDevice* dev, ComPtr<IAudioClient>& ac, int channels
 }
 
 bool playWasapi(const std::wstring& id, int channels, uint32_t mask, int rate, const PlayOptions& opt,
-                const PullFn& pull, std::atomic<bool>& stop, std::string& err, std::string* modeInfo) {
+                const PullFn& pull, std::atomic<bool>& stop, std::string& err, std::string* modeInfo,
+                int* bufferFrames) {
     ComInit com;
     MmcssScope mmcss;
     ComPtr<IMMDevice> dev;
@@ -287,7 +323,7 @@ bool playWasapi(const std::wstring& id, int channels, uint32_t mask, int rate, c
     std::string mode;
     if (opt.exclusive) {
         std::string why;
-        exclusive = initExclusive(dev.p, ac, channels, mask, rate, xf, ev, why);
+        exclusive = initExclusive(dev.p, ac, channels, mask, rate, xf, ev, opt.lowLatency, why);
         if (!exclusive) {
             mode = "partagé (exclusif impossible : " + why + ")";
             ac.reset();
@@ -295,13 +331,28 @@ bool playWasapi(const std::wstring& id, int channels, uint32_t mask, int rate, c
             if (FAILED(hr)) { CloseHandle(ev); err = hr2s("Activation IAudioClient impossible", hr); return false; }
         }
     }
+    UINT32 llPeriod = 0;
     if (!exclusive) {
-        WAVEFORMATEXTENSIBLE wf = makeFormat(channels, mask, rate, { 32, 32, true });
-        const DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | 0x80000000 /*AUTOCONVERTPCM*/ | 0x08000000 /*SRC_DEFAULT_QUALITY*/;
-        hr = ac->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, (REFERENCE_TIME)opt.bufferMs * 10000, 0, (WAVEFORMATEX*)&wf, nullptr);
-        if (FAILED(hr)) { CloseHandle(ev); err = hr2s("Initialisation du flux de sortie refusee", hr); return false; }
+        bool ll = false;
+        if (opt.lowLatency) {
+            WAVEFORMATEX* mix = nullptr;
+            if (SUCCEEDED(ac->GetMixFormat(&mix)) && sameAsMix(mix, channels, mask, rate))
+                ll = initLowLatencyShared(ac.p, mix, llPeriod);
+            if (mix) CoTaskMemFree(mix);
+            if (!ll) {            // un essai refusé peut laisser le client dans un état indéterminé
+                ac.reset();
+                hr = dev->Activate(kIID_IAudioClient, CLSCTX_ALL, nullptr, (void**)&ac);
+                if (FAILED(hr)) { CloseHandle(ev); err = hr2s("Activation IAudioClient impossible", hr); return false; }
+            }
+        }
+        if (!ll) {
+            WAVEFORMATEXTENSIBLE wf = makeFormat(channels, mask, rate, { 32, 32, true });
+            const DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | 0x80000000 /*AUTOCONVERTPCM*/ | 0x08000000 /*SRC_DEFAULT_QUALITY*/;
+            hr = ac->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, (REFERENCE_TIME)opt.bufferMs * 10000, 0, (WAVEFORMATEX*)&wf, nullptr);
+            if (FAILED(hr)) { CloseHandle(ev); err = hr2s("Initialisation du flux de sortie refusee", hr); return false; }
+        }
         ac->SetEventHandle(ev);
-        if (mode.empty()) mode = "partagé";
+        if (mode.empty()) mode = ll ? "partagé faible latence (IAudioClient3)" : "partagé";
     }
     UINT32 bufFrames = 0;
     ac->GetBufferSize(&bufFrames);
@@ -311,12 +362,16 @@ bool playWasapi(const std::wstring& id, int channels, uint32_t mask, int rate, c
         if (exclusive)
             snprintf(b, sizeof b, "exclusif — %s %d bits, %d Hz, %d canaux, période %.1f ms (directement à la carte son)",
                      xf.isFloat ? "flottant" : "entier", xf.valid, rate, channels, 1000.0 * bufFrames / rate);
+        else if (llPeriod)
+            snprintf(b, sizeof b, "%s — flottant 32 bits, %d Hz, %d canaux, période %.1f ms, tampon %.1f ms (via le mélangeur de Windows)",
+                     mode.c_str(), rate, channels, 1000.0 * llPeriod / rate, 1000.0 * bufFrames / rate);
         else
             snprintf(b, sizeof b, "%s — flottant 32 bits, %d Hz, %d canaux, tampon %.0f ms (via le mélangeur de Windows)",
                      mode.c_str(), rate, channels, 1000.0 * bufFrames / rate);
         mode = b;
     }
     if (modeInfo) *modeInfo = mode;
+    if (bufferFrames) *bufferFrames = (int)bufFrames;
     ComPtr<IAudioRenderClient> rc;
     hr = ac->GetService(kIID_IAudioRenderClient, (void**)&rc);
     if (FAILED(hr)) { CloseHandle(ev); err = hr2s("Service de rendu indisponible", hr); return false; }
@@ -370,6 +425,8 @@ struct WasapiCapture::Impl {
     bool isFloat = true;
     uint32_t mask = 0;
     std::vector<float> conv;
+    double periodMs = 10;
+    std::string mode;
     ~Impl() { if (ev) CloseHandle(ev); cc.reset(); ac.reset(); dev.reset(); }
 };
 
@@ -378,8 +435,10 @@ WasapiCapture::~WasapiCapture() { delete d_; }
 int WasapiCapture::channels() const { return d_->ch; }
 int WasapiCapture::rate() const { return d_->rate; }
 uint32_t WasapiCapture::mask() const { return d_->mask; }
+double WasapiCapture::periodMs() const { return d_->periodMs; }
+std::string WasapiCapture::modeInfo() const { return d_->mode; }
 
-bool WasapiCapture::open(const std::wstring& id, int bufferMs, std::string& err) {
+bool WasapiCapture::open(const std::wstring& id, int bufferMs, std::string& err, bool lowLatency) {
     auto& d = *d_;
     HRESULT hr = openDevice(id, true, d.dev);
     if (FAILED(hr)) { err = hr2s("Peripherique de capture introuvable", hr); return false; }
@@ -396,9 +455,25 @@ bool WasapiCapture::open(const std::wstring& id, int bufferMs, std::string& err)
         d.isFloat = IsEqualGUID(x->SubFormat, kSUBTYPE_IEEE_FLOAT) != 0;
     }
     if (!d.mask) d.mask = defaultMask(d.ch);
-    hr = d.ac->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, (REFERENCE_TIME)bufferMs * 10000, 0, mix, nullptr);
+    UINT32 llPeriod = 0;
+    bool ll = lowLatency && initLowLatencyShared(d.ac.p, mix, llPeriod);
+    if (!ll && lowLatency) {
+        d.ac.reset();
+        hr = d.dev->Activate(kIID_IAudioClient, CLSCTX_ALL, nullptr, (void**)&d.ac);
+        if (FAILED(hr)) { CoTaskMemFree(mix); err = hr2s("Activation de la capture impossible", hr); return false; }
+    }
+    if (!ll) hr = d.ac->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, (REFERENCE_TIME)bufferMs * 10000, 0, mix, nullptr);
     CoTaskMemFree(mix);
     if (FAILED(hr)) { err = hr2s("Initialisation de la capture refusee", hr); return false; }
+    if (ll) {
+        d.periodMs = 1000.0 * llPeriod / d.rate;
+        d.mode = "faible latence (IAudioClient3)";
+    } else {
+        REFERENCE_TIME def = 0, mn = 0;
+        d.ac->GetDevicePeriod(&def, &mn);
+        d.periodMs = def > 0 ? def / 10000.0 : 10.0;
+        d.mode = "standard";
+    }
     d.ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     d.ac->SetEventHandle(d.ev);
     hr = d.ac->GetService(kIID_IAudioCaptureClient, (void**)&d.cc);
