@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include <string>
 #include <thread>
 #include <atomic>
 
@@ -316,7 +317,9 @@ static void testConvolver() {
 
 // Lecteur WAV : aller-retour avec l'écrivain (flottant 32 bits, masque 5.1)
 static void testWavRoundTrip() {
-    const char* path = "/tmp/s3d_test_51.wav";
+    // fichier temporaire dans le dossier courant (portable Windows / Linux)
+    const std::string pathS = "s3d_test_51.wav";
+    const char* path = pathS.c_str();
     std::vector<float> x(6 * 1000);
     for (size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.01f * i) * 0.5f;
     { WavWriter w; w.open(path, 6, 44100, 0x60F); w.write(x.data(), 1000); w.close(); }
