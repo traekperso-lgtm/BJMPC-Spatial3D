@@ -45,6 +45,8 @@ public:
         std::string error, warning, outputMode, captureMode;
         // latence bout en bout estimée : capture + marge + traitement + limiteur + tampon de sortie
         double capturePeriodMs = 0, processingMs = 0, outputBufferMs = 0, totalLatencyMs = 0;
+        bool followVolume = false, windowsMuted = false;   // volume / sourdine Windows de CABLE Input
+        double windowsVolumeDb = 0;
     };
     LiveEngine();
     ~LiveEngine();
@@ -55,6 +57,9 @@ public:
     bool running() const { return running_; }
     Status status() const;
     Scene scene() const;
+    // Déplace les enceintes en direct (même disposition, nouveaux azimuts) : nouvelle matrice
+    // calculée ici, échangée par le fil audio avec un fondu enchaîné. Sans effet au casque.
+    bool moveSpeakers(const Layout& out);
     void setGainDb(double db) { gain_ = (float)std::pow(10.0, db / 20.0); }
     Meters meters;
 private:

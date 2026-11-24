@@ -14,10 +14,13 @@
 #include <propsys.h>
 #include <propidl.h>
 #include <avrt.h>
+#include <endpointvolume.h>
 #include <cstdio>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <future>
+#include <thread>
 #include <vector>
 
 namespace s3d {
@@ -27,6 +30,9 @@ static const GUID kCLSID_MMDeviceEnumerator = { 0xBCDE0395, 0xE52F, 0x467C, { 0x
 static const GUID kIID_IMMDeviceEnumerator  = { 0xA95664D2, 0x9614, 0x4F35, { 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6 } };
 static const GUID kIID_IAudioClient         = { 0x1CB9AD4C, 0xDBFA, 0x4C32, { 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2 } };
 static const GUID kIID_IAudioClient3        = { 0x7ED4EE07, 0x8E67, 0x4CD4, { 0x8C, 0x1A, 0x2B, 0x7A, 0x59, 0x87, 0xAD, 0x42 } };
+static const GUID kIID_IAudioEndpointVolume = { 0x5CDF2C82, 0x841E, 0x4546, { 0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A } };
+static const GUID kIID_IAudioEndpointVolumeCallback = { 0x657804FA, 0xD6AD, 0x4496, { 0x8A, 0x60, 0x35, 0x27, 0x52, 0xAF, 0x4F, 0x89 } };
+static const GUID kIID_IUnknownS3D = { 0x00000000, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
 static const GUID kIID_IAudioRenderClient   = { 0xF294ACFC, 0x3146, 0x4483, { 0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2 } };
 static const GUID kIID_IAudioCaptureClient  = { 0xC8ADBD64, 0xE71E, 0x48A0, { 0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17 } };
 static const GUID kSUBTYPE_IEEE_FLOAT       = { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
@@ -560,6 +566,97 @@ bool setEndpoint71(const std::wstring& id, bool capture, int rate, std::string& 
     }
     err = hr2s("Format 7.1 refuse par le peripherique", hr);
     return false;
+}
+
+// =============================================================================================
+//  Volume / sourdine Windows d'un périphérique (CABLE Input)
+// =============================================================================================
+namespace {
+struct VolumeCallback final : public IAudioEndpointVolumeCallback {
+    LONG ref = 1;
+    HANDLE ev;
+    explicit VolumeCallback(HANDLE e) : ev(e) {}
+    virtual ~VolumeCallback() = default;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** pp) override {
+        if (IsEqualGUID(riid, kIID_IUnknownS3D) || IsEqualGUID(riid, kIID_IAudioEndpointVolumeCallback)) {
+            *pp = static_cast<IAudioEndpointVolumeCallback*>(this); AddRef(); return S_OK;
+        }
+        *pp = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&ref); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG r = InterlockedDecrement(&ref);
+        if (r == 0) delete this;
+        return (ULONG)r;
+    }
+    // Appelée par Windows à chaque changement : on réveille seulement le fil de suivi
+    HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA) override { SetEvent(ev); return S_OK; }
+};
+} // namespace
+
+struct EndpointVolumeWatch::Impl {
+    std::thread th;
+    std::atomic<bool> stop{ false };
+    std::atomic<float> gain{ 1.f }, db{ 0.f };
+    std::atomic<bool> muted{ false };
+    HANDLE ev = nullptr;
+};
+
+EndpointVolumeWatch::EndpointVolumeWatch() : d_(new Impl) {}
+EndpointVolumeWatch::~EndpointVolumeWatch() { stop(); delete d_; }
+float EndpointVolumeWatch::gain() const { return d_->gain.load(std::memory_order_relaxed); }
+bool EndpointVolumeWatch::muted() const { return d_->muted; }
+float EndpointVolumeWatch::levelDb() const { return d_->db; }
+
+bool EndpointVolumeWatch::start(const std::wstring& id, std::string& err) {
+    stop();
+    d_->stop = false;
+    d_->ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    std::promise<std::string> ready;
+    auto f = ready.get_future();
+    d_->th = std::thread([this, id, &ready] {
+        ComInit com;
+        ComPtr<IMMDevice> dev;
+        ComPtr<IAudioEndpointVolume> vol;
+        HRESULT hr = openDevice(id, false, dev);
+        if (SUCCEEDED(hr)) hr = dev->Activate(kIID_IAudioEndpointVolume, CLSCTX_ALL, nullptr, (void**)&vol);
+        if (FAILED(hr)) { ready.set_value(hr2s("Volume Windows de VB-Cable inaccessible", hr)); return; }
+        auto* cb = new VolumeCallback(d_->ev);
+        const bool reg = SUCCEEDED(vol->RegisterControlChangeNotify(cb));
+        auto read = [&] {
+            BOOL m = FALSE; float lv = 0.f, sc = 1.f;
+            vol->GetMute(&m);
+            vol->GetMasterVolumeLevelScalar(&sc);
+            const bool haveDb = SUCCEEDED(vol->GetMasterVolumeLevel(&lv));
+            float g = haveDb ? std::pow(10.f, std::min(lv, 0.f) / 20.f) : sc * sc;
+            if (m || sc <= 0.0001f) g = 0.f;                 // curseur à zéro = silence, comme Windows
+            d_->muted = m != FALSE;
+            d_->db = haveDb ? lv : 20.f * std::log10(std::max(1e-5f, sc * sc));
+            d_->gain = g;
+        };
+        read();
+        ready.set_value("");
+        while (!d_->stop) {
+            // notification immédiate ; relecture de sécurité toutes les secondes
+            WaitForSingleObject(d_->ev, 1000);
+            if (!d_->stop) read();
+        }
+        if (reg) vol->UnregisterControlChangeNotify(cb);
+        cb->Release();
+    });
+    err = f.get();
+    if (!err.empty()) { stop(); return false; }
+    return true;
+}
+
+void EndpointVolumeWatch::stop() {
+    if (d_->th.joinable()) {
+        d_->stop = true;
+        if (d_->ev) SetEvent(d_->ev);
+        d_->th.join();
+    }
+    if (d_->ev) { CloseHandle(d_->ev); d_->ev = nullptr; }
+    d_->gain = 1.f; d_->muted = false; d_->db = 0.f;
 }
 
 } // namespace s3d

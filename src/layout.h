@@ -3,6 +3,7 @@
 //              élévation en degrés, positive = vers le haut.
 #pragma once
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -42,5 +43,14 @@ Layout layoutFromMask(uint64_t mask, const std::string& name = "");
 bool layoutFromName(const std::string& name, Layout& out);   // "2.0", "5.1", "7.1.4", "casque"...
 std::string describeMask(uint64_t mask);
 std::vector<std::string> knownLayoutNames();
+
+// Positions réelles des enceintes, réglées à la souris dans l'interface.
+// Texte « 5.1|0:35,1:-35;7.1|9:100 » : par disposition, identifiant de canal -> azimut en degrés.
+using SpeakerOverrides = std::map<std::string, std::map<int, double>>;
+SpeakerOverrides parseSpeakerOverrides(const std::string& spec);
+std::string formatSpeakerOverrides(const SpeakerOverrides& o);
+void applySpeakerOverrides(Layout& l, const std::string& spec);   // sans effet au casque
+// Azimut acceptable pour l'enceinte i (au moins 5° de ses voisines de même étage) ?
+bool speakerMoveAllowed(const Layout& l, int i, double az);
 
 } // namespace s3d

@@ -61,6 +61,24 @@ private:
     Impl* d_;
 };
 
+// Volume et sourdine Windows d'un périphérique de lecture. VB-Cable affiche un curseur de volume et
+// un bouton sourdine mais ne les applique pas (le son passe tel quel) : Spatial3D lit donc ceux de
+// CABLE Input et les applique lui-même. Suivi par notification dans un fil dédié : aucun appel COM
+// dans le fil audio, qui lit seulement gain().
+class EndpointVolumeWatch {
+public:
+    EndpointVolumeWatch();
+    ~EndpointVolumeWatch();
+    bool start(const std::wstring& id, std::string& err);
+    void stop();
+    float gain() const;          // amplitude linéaire à appliquer (0 = sourdine)
+    bool muted() const;
+    float levelDb() const;
+private:
+    struct Impl;
+    Impl* d_;
+};
+
 // Réglages système (API IPolicyConfig, utilisée par le Panneau de configuration Son)
 bool setDefaultEndpoint(const std::wstring& id, std::string& err);
 bool setEndpoint71(const std::wstring& id, bool capture, int rate, std::string& err);

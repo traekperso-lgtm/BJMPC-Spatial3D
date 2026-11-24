@@ -1,6 +1,6 @@
 # Spatial3D — spatialisation 3D pour Windows
 
-**BJMPC Informatique** · v0.5.0 · C++17
+**BJMPC Informatique** · v0.5.1 · C++17
 
 Spatial3D regarde comment le PC est équipé (casque, stéréo, 5.1, 7.1, 7.1.4…) et place chaque son de
 Windows au meilleur endroit possible sur **ce** matériel, en temps réel. Le moteur est conçu pour être
@@ -15,7 +15,10 @@ Lancez **Spatial3D** (Bureau ou menu Démarrer). Deux onglets :
 - **Temps réel** : un bouton « Activer le son 3D » spatialise tout le son de Windows (jeux, films,
   navigateur, musique) via VB-Cable. À droite, la **vue de la scène** vue de dessus : les sources
   (points orange) et les enceintes (carrés ; violet = hauteur) s'allument avec le son, les traits
-  montrent quelle source alimente quelle enceinte. En dessous, les VU-mètres d'entrée et de sortie.
+  montrent quelle source alimente quelle enceinte. **Glissez une enceinte** autour de l'auditeur pour
+  la placer comme dans votre pièce : le placement est recalculé en direct (fondu enchaîné, sans clic)
+  et mémorisé par disposition ; double-clic ou « Positions d'origine » pour revenir aux angles ITU.
+  En dessous, les VU-mètres d'entrée et de sortie.
   L'état indique la **latence estimée de bout en bout**, la marge, la dérive d'horloge, la fréquence
   reçue, les coupures et les modes WASAPI obtenus (capture et sortie).
 - **Réglages** : sortie, disposition (automatique, casque, 5.1…), étalement, pièce virtuelle,
@@ -97,6 +100,9 @@ horloge. Ce que fait Spatial3D pour éviter les pops :
   **mémorisée** pour le lancement suivant ;
 - **fondus de 2 ms** à chaque discontinuité : si le tampon se vide, le son s'éteint en douceur puis
   revient en fondu ; s'il déborde (après une pause ou une sortie de veille), fondu enchaîné ;
+- **volume et sourdine de Windows respectés** : VB-Cable ignore le curseur de volume et le bouton
+  sourdine de *CABLE Input* (le son passait tel quel). Spatial3D les surveille et les applique
+  lui-même, touches de volume du clavier comprises, avec une rampe sans clic (option dans Réglages) ;
 - **limiteur à anticipation** (1,5 ms) : le gain baisse *avant* une crête, sans saut ;
 - **transfert capture → rendu sans verrou** (anneau à un producteur et un consommateur) et **aucune
   allocation** dans les fils audio ; dénormaux désactivés (FTZ/DAZ) pour éviter les pics de calcul ;
@@ -217,7 +223,7 @@ Sous Linux (développement du moteur, rendu `--wav` uniquement) :
 | `src/wasapi_output.*` | Périphériques Windows, lecture et capture WASAPI (IAudioClient3 faible latence, exclusif), réglage 7.1 et sortie par défaut (IPolicyConfig) |
 | `src/live.*` | Mode temps réel : VB-Cable → moteur → vraie sortie, restauration à la fermeture |
 | `src/live_core.*` | Anneau SPSC, rééchantillonneur adaptatif, régulateur de dérive d'horloge (portable, testé) |
-| `tests/test_core.cpp` | 45 vérifications (identités, downmix, hauteurs, Ambisonique, ITD/ILD, dérive, limiteur, absence de clics, anneau, convolution, WAV) |
+| `tests/test_core.cpp` | 51 vérifications (positions d’enceintes, identités, downmix, hauteurs, Ambisonique, ITD/ILD, dérive, limiteur, absence de clics, anneau, convolution, WAV) |
 
 ## Limites connues
 

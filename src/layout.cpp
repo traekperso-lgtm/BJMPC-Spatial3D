@@ -1,7 +1,10 @@
 #include "layout.h"
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <sstream>
 
 namespace s3d {
 
@@ -139,6 +142,69 @@ std::string describeMask(uint64_t mask) {
     int n = 0; for (int i = 0; i < 64; ++i) if (has(mask, i)) ++n;
     return std::to_string(n) + " canaux (masque 0x" + [&] {
         char b[32]; snprintf(b, sizeof b, "%llX", (unsigned long long)mask); return std::string(b); }() + ")";
+}
+
+SpeakerOverrides parseSpeakerOverrides(const std::string& spec) {
+    SpeakerOverrides o;
+    std::stringstream ss(spec);
+    for (std::string part; std::getline(ss, part, ';');) {
+        const size_t bar = part.find('|');
+        if (bar == std::string::npos || bar == 0) continue;
+        auto& m = o[part.substr(0, bar)];
+        std::stringstream ps(part.substr(bar + 1));
+        for (std::string kv; std::getline(ps, kv, ',');) {
+            const size_t c = kv.find(':');
+            if (c == std::string::npos) continue;
+            const double az = atof(kv.c_str() + c + 1);
+            if (std::isfinite(az)) m[atoi(kv.c_str())] = az;
+        }
+        if (m.empty()) o.erase(part.substr(0, bar));
+    }
+    return o;
+}
+
+std::string formatSpeakerOverrides(const SpeakerOverrides& o) {
+    std::string s;
+    for (auto& [name, m] : o) {
+        if (m.empty()) continue;
+        if (!s.empty()) s += ';';
+        s += name + '|';
+        bool first = true;
+        for (auto& [id, az] : m) {
+            char b[32]; snprintf(b, sizeof b, "%s%d:%.0f", first ? "" : ",", id, az);
+            s += b; first = false;
+        }
+    }
+    return s;
+}
+
+static double wrapAz(double a) {
+    while (a > 180) a -= 360;
+    while (a <= -180) a += 360;
+    return a;
+}
+
+void applySpeakerOverrides(Layout& l, const std::string& spec) {
+    if (l.headphones || spec.empty()) return;
+    const auto o = parseSpeakerOverrides(spec);
+    auto it = o.find(l.name);
+    if (it == o.end()) return;
+    for (int i = 0; i < (int)l.speakers.size(); ++i) {
+        auto& sp = l.speakers[i];
+        auto f = it->second.find(sp.id);
+        if (sp.lfe || f == it->second.end()) continue;
+        if (speakerMoveAllowed(l, i, f->second)) sp.az = wrapAz(f->second);
+    }
+}
+
+bool speakerMoveAllowed(const Layout& l, int i, double az) {
+    if (i < 0 || i >= (int)l.speakers.size() || l.speakers[i].lfe) return false;
+    for (int k = 0; k < (int)l.speakers.size(); ++k) {
+        const auto& o = l.speakers[k];
+        if (k == i || o.lfe || std::fabs(o.el - l.speakers[i].el) > 10) continue;
+        if (std::fabs(wrapAz(o.az - az)) < 5) return false;
+    }
+    return true;
 }
 
 } // namespace s3d

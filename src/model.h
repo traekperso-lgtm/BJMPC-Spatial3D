@@ -18,6 +18,8 @@ struct Settings {
     bool keepDefault = false;         // temps réel : ne pas basculer Windows sur VB-Cable
     bool exclusive = false;           // temps réel : sortie WASAPI en mode exclusif
     bool lowLatency = true;           // période WASAPI minimale (IAudioClient3 en partagé)
+    std::string speakerPos;           // positions réelles des enceintes (voir parseSpeakerOverrides)
+    bool followCableVolume = true;    // appliquer le volume / la sourdine Windows de CABLE Input
     // préférences de l'interface
     bool liveOnLaunch = false;
     bool closeToTray = true;

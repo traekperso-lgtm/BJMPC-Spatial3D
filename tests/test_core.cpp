@@ -334,6 +334,37 @@ static void testWavRoundTrip() {
     CHECK(same, "WAV : echantillons relus a l'identique");
 }
 
+// Enceintes déplacées à la souris : réglage relu, matrice saine, source envoyée à la bonne enceinte
+static void testSpeakerOverrides() {
+    const std::string spec = formatSpeakerOverrides({ { "5.1", { { CH_FL, 45 }, { CH_FR, -45 }, { CH_SL, 100 } } } });
+    auto o = parseSpeakerOverrides(spec);
+    CHECK(o.size() == 1 && o["5.1"].size() == 3 && o["5.1"][CH_SL] == 100, "Positions : texte relu a l'identique");
+    Layout l; layoutFromName("5.1", l);
+    applySpeakerOverrides(l, spec);
+    CHECK(l.speakers[l.indexOf(CH_FL)].az == 45 && l.speakers[l.indexOf(CH_FR)].az == -45, "Positions : azimuts appliques");
+    CHECK(!speakerMoveAllowed(l, l.indexOf(CH_FC), 43), "Positions : deux enceintes au meme endroit refusees");
+    // une source à 45° tombe entièrement sur l'avant gauche déplacé à 45°
+    auto src = sourcesFromChannels({ CH_FL });
+    src[0].az = 45; src[0].el = 0;
+    auto M = buildSpeakerMatrix(src, 1, l, {});
+    CHECK(std::fabs(M[l.indexOf(CH_FL)] - 1.f) < 1e-3f, "Positions : source sur l'enceinte deplacee");
+    // canaux 5.1 vers ce 5.1 asymétrique : gains finis, puissance conservée
+    Layout in51; layoutFromName("5.1", in51);
+    auto s51 = sourcesFromChannels(ids(in51));
+    auto M2 = buildSpeakerMatrix(s51, 6, l, {});
+    bool ok = true;
+    for (int i = 0; i < 6; ++i) {
+        if (s51[i].lfe) continue;
+        double p = 0;
+        for (int k = 0; k < 6; ++k) { const float g = M2[k * 6 + i]; if (!std::isfinite(g)) ok = false; p += g * g; }
+        if (std::fabs(p - 1.0) > 0.02) ok = false;
+    }
+    CHECK(ok, "Positions : puissance conservee sur une disposition deplacee");
+    Layout hp; layoutFromName("casque", hp);
+    applySpeakerOverrides(hp, spec);
+    CHECK(hp.headphones, "Positions : sans effet au casque");
+}
+
 int main() {
     testIdentity();
     testDownmix51to20();
@@ -345,6 +376,7 @@ int main() {
     testLimiter();
     testLiveStage();
     testSpscRing();
+    testSpeakerOverrides();
     testConvolver();
     testWavRoundTrip();
     printf("%d/%d verifications reussies\n", checks - fails, checks);

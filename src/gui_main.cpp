@@ -213,6 +213,7 @@ std::wstring fileDialog(const wchar_t* filter, const wchar_t* title) {
 
 void applyActions(const UiActions& a) {
     if (a.gainChanged) g_live.setGainDb(g_m.settings.gainDb);
+    if (a.speakersMoved && g_live.running() && g_live.moveSpeakers(g_m.liveScene.out)) g_m.liveScene = g_live.scene();
     if (a.settingsChanged) { saveSettings(g_m.settings); refreshDevices(); }
     if (a.startWithWindowsChanged) setStartWithWindows(g_m.settings.startWithWindows, L"--tray");
     if (a.toggleLive) {
@@ -282,6 +283,7 @@ void updateModel() {
     g_m.captureGlitches = st.captureGlitches;
     g_m.liveOutputMode = st.outputMode;
     g_m.liveCaptureMode = st.captureMode;
+    g_m.followVolume = st.followVolume; g_m.windowsMuted = st.windowsMuted; g_m.windowsVolumeDb = st.windowsVolumeDb;
     g_m.capturePeriodMs = st.capturePeriodMs; g_m.processingMs = st.processingMs;
     g_m.outputBufferMs = st.outputBufferMs; g_m.totalLatencyMs = st.totalLatencyMs;
     g_m.liveError = !g_liveStartError.empty() ? g_liveStartError : st.error;

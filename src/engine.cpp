@@ -74,6 +74,8 @@ Settings loadSettings() {
     s.keepDefault = flag("garder_sortie", false);
     s.exclusive = flag("exclusif", false);
     s.lowLatency = flag("faible_latence", true);
+    s.followCableVolume = flag("suivre_volume_windows", true);
+    if (kv.count("positions")) s.speakerPos = kv["positions"];
     s.liveOnLaunch = flag("temps_reel_au_lancement", false);
     s.closeToTray = flag("fermer_dans_zone_notif", true);
     s.startWithWindows = flag("demarrer_avec_windows", false);
@@ -92,6 +94,8 @@ void saveSettings(const Settings& s) {
       << "garder_sortie=" << (s.keepDefault ? 1 : 0) << "\n"
       << "exclusif=" << (s.exclusive ? 1 : 0) << "\n"
       << "faible_latence=" << (s.lowLatency ? 1 : 0) << "\n"
+      << "suivre_volume_windows=" << (s.followCableVolume ? 1 : 0) << "\n"
+      << "positions=" << s.speakerPos << "\n"
       << "temps_reel_au_lancement=" << (s.liveOnLaunch ? 1 : 0) << "\n"
       << "fermer_dans_zone_notif=" << (s.closeToTray ? 1 : 0) << "\n"
       << "demarrer_avec_windows=" << (s.startWithWindows ? 1 : 0) << "\n";
@@ -137,8 +141,9 @@ Layout layoutForEndpoint(const Endpoint& e) {
 
 Layout layoutFor(const Settings& s, const Endpoint& e) {
     Layout l;
-    if (s.layout != "auto" && layoutFromName(s.layout, l)) return l;
-    return layoutForEndpoint(e);
+    if (s.layout == "auto" || !layoutFromName(s.layout, l)) l = layoutForEndpoint(e);
+    applySpeakerOverrides(l, s.speakerPos);
+    return l;
 }
 
 bool resolveOutput(const Settings& s, Endpoint& out, std::string& err) {
@@ -217,6 +222,15 @@ struct LiveEngine::Impl {
     Endpoint cableIn, cableOut, outEp;
     std::unique_ptr<Renderer> renderer;
     Scene scene;
+    // déplacement des enceintes en direct : l'interface dépose, le fil audio échange et rend l'ancien
+    std::atomic<Renderer*> pending{ nullptr }, retired{ nullptr };
+    std::vector<VirtualSource> sources;
+    RenderOptions opt;
+    int outRate = 48000;
+    std::vector<float> xfade;               // rendu du nouveau moteur pendant le fondu
+    EndpointVolumeWatch vol;                // volume / sourdine Windows de CABLE Input
+    bool followVol = false;
+    ~Impl() { delete pending.exchange(nullptr); delete retired.exchange(nullptr); }
     SpscRing ring;                         // capture -> rendu, sans verrou
     std::promise<void> go;                 // la capture démarre une fois le moteur prêt
     std::atomic<int> ringOverflow{ 0 };
@@ -309,6 +323,7 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     const RenderOptions opt = optionsFor(s, outL);
     const int outRate = d.outEp.mixRate;
     d.renderer = makeRenderer(sources, d.capCh, outL, outRate, opt, err);
+    d.sources = sources; d.opt = opt; d.outRate = outRate;
     if (!d.renderer) { d.capStop = true; d.go.set_value(); d.capThread.join(); return false; }
     d.scene = makeScene(sources, d.capCh, outL, opt);
     d.scene.inIds = ids;
@@ -319,6 +334,12 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     d.ring.init((size_t)d.capRate * d.capCh);        // 1 seconde de marge
     d.incoming.assign((size_t)d.capRate * d.capCh, 0.f);
     d.inBuf.assign((size_t)16384 * d.capCh, 0.f);
+    d.xfade.assign((size_t)16384 * d.renderer->outChannels(), 0.f);
+    if (s.followCableVolume) {
+        std::string ve;
+        d.followVol = d.vol.start(d.cableIn.id, ve);
+        if (!d.followVol && d.warning.empty()) d.warning = ve;
+    }
     d.stage.init(d.capCh, d.capRate, outRate, std::clamp(s.marginMs, 5, 200));
     d.marginMs = d.stage.controller().marginMs();
     d.lim.init(outRate, d.renderer->outChannels());
@@ -338,6 +359,7 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     d.renderThread = std::thread([this, outCh, outMask, outRate] {
         auto& d = *d_;
         bool ftz = true;
+        float volCur = d.followVol ? d.vol.gain() : 1.f;
         auto pull = [&](float* dst, size_t frames) -> size_t {
             if (ftz) { ftz = false; enableFlushToZero(); }
             const size_t got = d.ring.pop(d.incoming.data(), d.incoming.size());
@@ -348,8 +370,36 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
             d.stage.produce(d.inBuf.data(), frames, sourceIdle);
             Meters::feed(meters.in, d.inBuf.data(), frames, d.capCh);
             d.renderer->process(d.inBuf.data(), dst, frames);
+            // enceintes déplacées : fondu enchaîné ancienne -> nouvelle matrice sur ce bloc
+            if (d.pending.load(std::memory_order_acquire) && !d.retired.load(std::memory_order_acquire) &&
+                frames * outCh <= d.xfade.size()) {
+                Renderer* nr = d.pending.exchange(nullptr);
+                if (nr) {
+                    nr->process(d.inBuf.data(), d.xfade.data(), frames);
+                    const float inv = 1.f / (float)frames;
+                    for (size_t f = 0; f < frames; ++f) {
+                        const float t = (f + 1) * inv;
+                        for (int c = 0; c < outCh; ++c) {
+                            float& o = dst[f * outCh + c];
+                            o += t * (d.xfade[f * outCh + c] - o);
+                        }
+                    }
+                    d.retired.store(d.renderer.release(), std::memory_order_release);
+                    d.renderer.reset(nr);
+                }
+            }
+            // gain général x volume Windows de CABLE Input (rampe sur le bloc : ni clic ni zip)
             const float g = gain_.load();
-            if (g != 1.f) for (size_t k = 0; k < frames * outCh; ++k) dst[k] *= g;
+            const float volT = d.followVol ? d.vol.gain() : 1.f;
+            if (g != 1.f || volT != 1.f || volCur != 1.f) {
+                const float step = (volT - volCur) / (float)frames;
+                for (size_t f = 0; f < frames; ++f) {
+                    volCur += step;
+                    const float k = g * volCur;
+                    for (int c = 0; c < outCh; ++c) dst[f * outCh + c] *= k;
+                }
+                volCur = volT;
+            }
             d.lim.process(dst, frames);
             Meters::feed(meters.out, dst, frames, outCh);
             const auto& dc = d.stage.controller();
@@ -379,6 +429,7 @@ void LiveEngine::stop() {
     d.stop = true; d.capStop = true;
     if (d.renderThread.joinable()) d.renderThread.join();
     if (d.capThread.joinable()) d.capThread.join();
+    d.vol.stop();
     if (d.switched) { std::string e; setDefaultEndpoint(d.outEp.id, e); d.switched = false; }
     running_ = false;
     meters.reset();
@@ -407,9 +458,32 @@ LiveEngine::Status LiveEngine::status() const {
     }
     st.inHz = d.inHz;
     st.error = d.error; st.warning = d.warning;
+    st.followVolume = d.followVol;
+    if (d.followVol) { st.windowsMuted = d.vol.muted(); st.windowsVolumeDb = d.vol.levelDb(); }
     return st;
 }
 
-Scene LiveEngine::scene() const { return d_ ? d_->scene : Scene{}; }
+Scene LiveEngine::scene() const {
+    if (!d_) return Scene{};
+    std::lock_guard<std::mutex> lk(d_->m);
+    return d_->scene;
+}
+
+bool LiveEngine::moveSpeakers(const Layout& out) {
+    if (!d_ || !running_) return false;
+    auto& d = *d_;
+    if (out.headphones || d.scene.out.headphones || out.speakers.size() != d.scene.out.speakers.size()) return false;
+    delete d.retired.exchange(nullptr);           // ancien moteur rendu par le fil audio
+    std::string err;
+    auto r = makeRenderer(d.sources, d.capCh, out, d.outRate, d.opt, err);
+    if (!r || r->outChannels() != d.scene.outChannels) return false;
+    Scene sc = makeScene(d.sources, d.capCh, out, d.opt);
+    delete d.pending.exchange(r.release());        // remplace un déplacement pas encore appliqué
+    std::lock_guard<std::mutex> lk(d.m);
+    sc.inIds = d.scene.inIds; sc.inputName = d.scene.inputName; sc.outputName = d.scene.outputName;
+    sc.plan = d.scene.plan;
+    d.scene = std::move(sc);
+    return true;
+}
 
 } // namespace s3d

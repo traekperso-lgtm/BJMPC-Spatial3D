@@ -71,12 +71,6 @@ static const char* shortName(int id) {
     }
 }
 
-static std::string mmss(double t) {
-    char b[32]; const int s = std::max(0, (int)t);
-    if (s >= 3600) snprintf(b, sizeof b, "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60);
-    else snprintf(b, sizeof b, "%02d:%02d", s / 60, s % 60);
-    return b;
-}
 
 static void smooth(float* dst, const float* src, int n) {
     const float k = std::exp(-ImGui::GetIO().DeltaTime * 5.f);
@@ -121,11 +115,17 @@ static ImVec2 scenePos(ImVec2 c, float R, double az, double el) {
     return ImVec2(c.x - std::sin(a) * r, c.y - std::cos(a) * r);
 }
 
-static void drawScene(const Scene* sc, const Layout& fallback, const float* inLv, const float* outLv, float height, float s) {
-    const Layout& L = sc ? sc->out : fallback;
+struct SceneEdit { bool moved = false, commit = false; };
+
+// L : disposition affichée, modifiable à la souris (glisser une enceinte = nouvel azimut)
+static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const float* outLv, float height, float s) {
+    SceneEdit ed;
+    static int s_drag = -1;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const float w = ImGui::GetContentRegionAvail().x;
+    ImGui::InvisibleButton("##scene", ImVec2(w, height));      // capte la souris sur toute la vue
+    const bool sceneHovered = ImGui::IsItemHovered();
     const ImVec2 c(p0.x + w * 0.5f, p0.y + height * 0.5f + 6 * s);
     const float R = std::min(w, height) * 0.36f;
 
@@ -171,6 +171,45 @@ static void drawScene(const Scene* sc, const Layout& fallback, const float* inLv
     const ImVec2 lfePos(p0.x + w - 46 * s, p0.y + height - 40 * s);
     if (lfeIdx >= 0) spk[lfeIdx] = lfePos;
 
+    // déplacement des enceintes : glisser autour de l'auditeur, double-clic = position d'origine
+    if (!L.headphones) {
+        int hov = -1;
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        for (size_t i = 0; i < L.speakers.size(); ++i) {
+            if (L.speakers[i].lfe) continue;
+            const float hs = 14 * s;
+            if (sceneHovered && std::fabs(mp.x - spk[i].x) <= hs && std::fabs(mp.y - spk[i].y) <= hs) hov = (int)i;
+        }
+        if (hov >= 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            double az, el; bool lfe;
+            if (channelPosition(L.speakers[hov].id, L.mask(), az, el, lfe) && speakerMoveAllowed(L, hov, az)) {
+                L.speakers[hov].az = az; ed.moved = ed.commit = true;
+            }
+            s_drag = -1;
+        } else if (hov >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            s_drag = hov;
+        }
+        if (s_drag >= (int)L.speakers.size()) s_drag = -1;
+        if (s_drag >= 0) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                const float dx = mp.x - c.x, dy = mp.y - c.y;
+                if (dx * dx + dy * dy > 1.f) {
+                    double az = std::round(std::atan2(-dx, -dy) * 180.0 / kPi);
+                    if (az <= -180) az += 360;
+                    if (std::fabs(az - L.speakers[s_drag].az) >= 1.0 && speakerMoveAllowed(L, s_drag, az)) {
+                        L.speakers[s_drag].az = az; ed.moved = true;
+                    }
+                }
+            } else {
+                ed.commit = true; s_drag = -1;
+            }
+        }
+        if (hov >= 0 || s_drag >= 0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (ed.moved)
+            for (size_t i = 0; i < L.speakers.size(); ++i)
+                if (!L.speakers[i].lfe) spk[i] = scenePos(c, R, L.speakers[i].az, L.speakers[i].el);
+    }
+
     // sources (et liaisons vers les enceintes)
     if (sc) {
         const bool ambi = !sc->sources.empty() && sc->sources[0].label.rfind("Ambi", 0) == 0;
@@ -214,7 +253,8 @@ static void drawScene(const Scene* sc, const Layout& fallback, const float* inLv
             const ImVec2 p = spk[i];
             if (lv > 0.01f) dl->AddCircleFilled(p, hs * (1.6f + lv), u32(base, 0.15f * lv), 32);
             dl->AddRectFilled(p - ImVec2(hs, hs), p + ImVec2(hs, hs), u32(mix(kPanel2, base, 0.35f + 0.65f * lv)), 4 * s);
-            dl->AddRect(p - ImVec2(hs, hs), p + ImVec2(hs, hs), u32(base), 4 * s, 0, 1.5f * s);
+            const bool dragging = (int)i == s_drag;
+            dl->AddRect(p - ImVec2(hs, hs), p + ImVec2(hs, hs), u32(dragging ? kOrange : base), 4 * s, 0, (dragging ? 2.5f : 1.5f) * s);
             dl->AddCircleFilled(p, hs * 0.45f, u32(kBg, 0.7f), 16);
             const char* nm = shortName(sp.id);
             centered(ImVec2(p.x, p.y + hs + 10 * s), u32(kText, 0.85f), nm);
@@ -223,6 +263,7 @@ static void drawScene(const Scene* sc, const Layout& fallback, const float* inLv
                 ImGui::Text("%s", channelName(sp.id));
                 if (!sp.lfe) ImGui::Text("azimut %.0f°, élévation %.0f°", sp.az, sp.el);
                 ImGui::Text("niveau %.1f dB", 20 * std::log10(std::max(1e-5f, outLv ? outLv[std::min((int)i, 31)] : 0.f)));
+                if (!sp.lfe) ImGui::TextDisabled("glisser : déplacer · double-clic : position d'origine");
                 ImGui::EndTooltip();
             }
         }
@@ -240,7 +281,21 @@ static void drawScene(const Scene* sc, const Layout& fallback, const float* inLv
     const std::string title = L.headphones ? "Casque — rendu binaural" : "Enceintes — " + L.name;
     dl->AddText(ImVec2(p0.x + 14 * s, p0.y + 10 * s), u32(kDim), title.c_str());
     ImGui::PopFont();
-    ImGui::Dummy(ImVec2(w, height));
+    return ed;
+}
+
+// Mémorise dans les réglages les azimuts qui diffèrent de la position d'origine
+static void storeSpeakerPositions(Settings& st, const Layout& L) {
+    auto o = parseSpeakerOverrides(st.speakerPos);
+    auto& m = o[L.name];
+    m.clear();
+    for (auto& sp : L.speakers) {
+        double az, el; bool lfe;
+        if (sp.lfe || !channelPosition(sp.id, L.mask(), az, el, lfe)) continue;
+        if (std::fabs(sp.az - az) >= 0.5) m[sp.id] = sp.az;
+    }
+    if (m.empty()) o.erase(L.name);
+    st.speakerPos = formatSpeakerOverrides(o);
 }
 
 static void drawMeters(const Layout& L, int nIn, const float* inLv, const float* outLv, const Scene* sc, float s) {
@@ -396,6 +451,10 @@ static void liveTab(UiModel& m, UiActions& a, float s) {
                     ImGui::SetTooltip("Capture %.1f ms + marge %.0f ms + traitement %.1f ms + sortie %.1f ms",
                                       m.capturePeriodMs, m.marginMs, m.processingMs, m.outputBufferMs);
             }
+            if (m.followVolume) {
+                if (m.windowsMuted) row("Volume Windows", "sourdine (son coupé)", &kAmber);
+                else { snprintf(b, sizeof b, "%.1f dB", m.windowsVolumeDb); row("Volume Windows", b); }
+            }
             snprintf(b, sizeof b, "%.0f ms (point bas %.1f)", m.marginMs, m.lowMs); row("Marge VB-Cable", b);
             snprintf(b, sizeof b, "%+.0f ppm", m.driftPpm); row("Dérive d'horloge", b);
             snprintf(b, sizeof b, "%.0f Hz", m.inHz); row("Entrée VB-Cable", m.inHz > 0 ? b : "—");
@@ -411,10 +470,33 @@ static void liveTab(UiModel& m, UiActions& a, float s) {
 
     ImGui::SameLine();
     ImGui::BeginChild("##liveR", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-    const float sceneH = ImGui::GetContentRegionAvail().y - 118 * s - ImGui::GetStyle().ItemSpacing.y;
+    const float hintH = ImGui::GetTextLineHeightWithSpacing() + 4 * s;
+    const float sceneH = ImGui::GetContentRegionAvail().y - 118 * s - hintH - 2 * ImGui::GetStyle().ItemSpacing.y;
     const Scene* sc = m.liveRunning ? &m.liveScene : nullptr;
-    drawScene(sc, m.previewLayout, in, out, sceneH, s);
-    drawMeters(sc ? sc->out : m.previewLayout, sc ? sc->inChannels : 0, in, out, sc, s);
+    Layout& L = sc ? m.liveScene.out : m.previewLayout;
+    SceneEdit ed = drawScene(sc, L, in, out, sceneH, s);
+    if (!L.headphones) {
+        const bool custom = parseSpeakerOverrides(m.settings.speakerPos).count(L.name) > 0;
+        ImGui::PushFont(font(F_SMALL));
+        ImGui::TextDisabled(m.liveRunning ? "Glissez une enceinte pour la placer comme chez vous : le son suit en direct."
+                                          : "Glissez une enceinte pour la placer comme chez vous.");
+        if (custom) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Positions d'origine")) {
+                for (auto& sp : L.speakers) {
+                    double az, el; bool lfe;
+                    if (!sp.lfe && channelPosition(sp.id, L.mask(), az, el, lfe)) sp.az = az;
+                }
+                ed.moved = ed.commit = true;
+            }
+        }
+        ImGui::PopFont();
+    } else {
+        ImGui::Dummy(ImVec2(1, hintH - ImGui::GetStyle().ItemSpacing.y));
+    }
+    if (ed.moved) a.speakersMoved = true;
+    if (ed.commit) { storeSpeakerPositions(m.settings, L); a.settingsChanged = true; }
+    drawMeters(L, sc ? sc->inChannels : 0, in, out, sc, s);
     ImGui::EndChild();
 }
 
@@ -483,6 +565,10 @@ static void settingsTab(UiModel& m, UiActions& a, float s) {
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::SliderInt("##marge", &mg, 5, 100, "%d ms")) m.settings.marginMs = mg;
     if (ImGui::IsItemDeactivatedAfterEdit()) a.settingsChanged = a.needRestart = true;
+    if (ImGui::Checkbox("Suivre le volume et la sourdine de Windows", &m.settings.followCableVolume)) a.settingsChanged = a.needRestart = true;
+    helpMarker("VB-Cable ignore le curseur de volume et le bouton sourdine de Windows : sans cette option, "
+               "couper le son ne coupait rien. Spatial3D les lit sur CABLE Input et les applique lui-même "
+               "(touches de volume du clavier comprises), avec un fondu sans clic.");
     if (ImGui::Checkbox("Latence minimale (périodes WASAPI les plus courtes)", &m.settings.lowLatency)) a.settingsChanged = a.needRestart = true;
     helpMarker("Windows 10/11 : le moteur audio tourne à la période minimale du pilote (souvent 2,7 ms au lieu "
                "de 10 ms), en capture comme en sortie ; en exclusif, période matérielle minimale. Décochez si "
