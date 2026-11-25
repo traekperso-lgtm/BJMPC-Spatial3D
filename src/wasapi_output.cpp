@@ -569,9 +569,12 @@ bool setEndpoint71(const std::wstring& id, bool capture, int rate, std::string& 
 }
 
 // =============================================================================================
-//  Volume / sourdine Windows d'un périphérique (CABLE Input)
+//  Volume / sourdine : CABLE Input <-> sortie réelle
 // =============================================================================================
 namespace {
+// Contexte de nos propres changements : leurs notifications sont ignorées (pas de ping-pong)
+const GUID kS3DVolumeContext = { 0x5D3A1C77, 0x2B6E, 0x4F1A, { 0x9C, 0x31, 0x7E, 0x45, 0x0A, 0x52, 0xD3, 0x10 } };
+
 struct VolumeCallback final : public IAudioEndpointVolumeCallback {
     LONG ref = 1;
     HANDLE ev;
@@ -589,60 +592,87 @@ struct VolumeCallback final : public IAudioEndpointVolumeCallback {
         if (r == 0) delete this;
         return (ULONG)r;
     }
-    // Appelée par Windows à chaque changement : on réveille seulement le fil de suivi
-    HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA) override { SetEvent(ev); return S_OK; }
+    // Appelée par Windows : on réveille seulement le fil de synchronisation (hors nos propres écritures)
+    HRESULT STDMETHODCALLTYPE OnNotify(PAUDIO_VOLUME_NOTIFICATION_DATA n) override {
+        if (!n || !IsEqualGUID(n->guidEventContext, kS3DVolumeContext)) SetEvent(ev);
+        return S_OK;
+    }
 };
 } // namespace
 
 struct EndpointVolumeWatch::Impl {
     std::thread th;
-    std::atomic<bool> stop{ false };
-    std::atomic<float> gain{ 1.f }, db{ 0.f };
-    std::atomic<bool> muted{ false };
-    HANDLE ev = nullptr;
+    std::atomic<bool> stop{ false }, exclusive{ false }, hwVolume{ true }, muted{ false };
+    std::atomic<float> db{ 0.f }, pct{ 100.f };
+    HANDLE evCable = nullptr, evOut = nullptr, evWake = nullptr;
 };
 
 EndpointVolumeWatch::EndpointVolumeWatch() : d_(new Impl) {}
 EndpointVolumeWatch::~EndpointVolumeWatch() { stop(); delete d_; }
-float EndpointVolumeWatch::gain() const { return d_->gain.load(std::memory_order_relaxed); }
+void EndpointVolumeWatch::setExclusive(bool on) { d_->exclusive = on; }
+bool EndpointVolumeWatch::digital() const { return d_->exclusive && !d_->hwVolume; }
 bool EndpointVolumeWatch::muted() const { return d_->muted; }
 float EndpointVolumeWatch::levelDb() const { return d_->db; }
+float EndpointVolumeWatch::levelPercent() const { return d_->pct; }
+float EndpointVolumeWatch::gain() const {
+    if (!digital()) return 1.f;
+    if (d_->muted) return 0.f;
+    return std::pow(10.f, std::min(0.f, d_->db.load(std::memory_order_relaxed)) / 20.f);
+}
 
-bool EndpointVolumeWatch::start(const std::wstring& id, std::string& err) {
+bool EndpointVolumeWatch::start(const std::wstring& cableId, const std::wstring& outputId, std::string& err) {
     stop();
     d_->stop = false;
-    d_->ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    d_->evCable = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    d_->evOut = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    d_->evWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::promise<std::string> ready;
     auto f = ready.get_future();
-    d_->th = std::thread([this, id, &ready] {
+    d_->th = std::thread([this, cableId, outputId, &ready] {
         ComInit com;
-        ComPtr<IMMDevice> dev;
-        ComPtr<IAudioEndpointVolume> vol;
-        HRESULT hr = openDevice(id, false, dev);
-        if (SUCCEEDED(hr)) hr = dev->Activate(kIID_IAudioEndpointVolume, CLSCTX_ALL, nullptr, (void**)&vol);
-        if (FAILED(hr)) { ready.set_value(hr2s("Volume Windows de VB-Cable inaccessible", hr)); return; }
-        auto* cb = new VolumeCallback(d_->ev);
-        const bool reg = SUCCEEDED(vol->RegisterControlChangeNotify(cb));
-        auto read = [&] {
+        ComPtr<IMMDevice> devC, devO;
+        ComPtr<IAudioEndpointVolume> vc, vo;
+        HRESULT hr = openDevice(cableId, false, devC);
+        if (SUCCEEDED(hr)) hr = devC->Activate(kIID_IAudioEndpointVolume, CLSCTX_ALL, nullptr, (void**)&vc);
+        if (SUCCEEDED(hr)) hr = openDevice(outputId, false, devO);
+        if (SUCCEEDED(hr)) hr = devO->Activate(kIID_IAudioEndpointVolume, CLSCTX_ALL, nullptr, (void**)&vo);
+        if (FAILED(hr)) { ready.set_value(hr2s("Volume Windows inaccessible", hr)); return; }
+        DWORD hw = 0;
+        if (SUCCEEDED(vo->QueryHardwareSupport(&hw))) d_->hwVolume = (hw & 1 /*ENDPOINT_HARDWARE_SUPPORT_VOLUME*/) != 0;
+        auto* cbC = new VolumeCallback(d_->evCable);
+        auto* cbO = new VolumeCallback(d_->evOut);
+        const bool regC = SUCCEEDED(vc->RegisterControlChangeNotify(cbC));
+        const bool regO = SUCCEEDED(vo->RegisterControlChangeNotify(cbO));
+        auto readOut = [&] {
             BOOL m = FALSE; float lv = 0.f, sc = 1.f;
-            vol->GetMute(&m);
-            vol->GetMasterVolumeLevelScalar(&sc);
-            const bool haveDb = SUCCEEDED(vol->GetMasterVolumeLevel(&lv));
-            float g = haveDb ? std::pow(10.f, std::min(lv, 0.f) / 20.f) : sc * sc;
-            if (m || sc <= 0.0001f) g = 0.f;                 // curseur à zéro = silence, comme Windows
-            d_->muted = m != FALSE;
-            d_->db = haveDb ? lv : 20.f * std::log10(std::max(1e-5f, sc * sc));
-            d_->gain = g;
+            vo->GetMute(&m);
+            vo->GetMasterVolumeLevelScalar(&sc);
+            if (FAILED(vo->GetMasterVolumeLevel(&lv))) lv = 20.f * std::log10(std::max(1e-5f, sc * sc));
+            if (sc <= 0.0001f) lv = -120.f;
+            d_->muted = m != FALSE; d_->db = lv; d_->pct = sc * 100.f;
         };
-        read();
+        // recopie a -> b (curseur et sourdine), marquée de notre contexte
+        auto copy = [](IAudioEndpointVolume* a, IAudioEndpointVolume* b) {
+            BOOL m = FALSE, mb = FALSE; float sc = 1.f, sb = -1.f;
+            if (FAILED(a->GetMute(&m)) || FAILED(a->GetMasterVolumeLevelScalar(&sc))) return;
+            b->GetMute(&mb); b->GetMasterVolumeLevelScalar(&sb);
+            if (std::fabs(sb - sc) > 0.002f) b->SetMasterVolumeLevelScalar(sc, &kS3DVolumeContext);
+            if ((mb != FALSE) != (m != FALSE)) b->SetMute(m, &kS3DVolumeContext);
+        };
+        copy(vo.p, vc.p);          // au démarrage, l'appareil maître fait foi
+        readOut();
         ready.set_value("");
+        HANDLE evs[3] = { d_->evCable, d_->evOut, d_->evWake };
         while (!d_->stop) {
-            // notification immédiate ; relecture de sécurité toutes les secondes
-            WaitForSingleObject(d_->ev, 1000);
-            if (!d_->stop) read();
+            const DWORD w = WaitForMultipleObjects(3, evs, FALSE, 2000);
+            if (d_->stop) break;
+            if (w == WAIT_OBJECT_0) copy(vc.p, vo.p);          // curseur / clavier -> carte réelle
+            else if (w == WAIT_OBJECT_0 + 1) copy(vo.p, vc.p); // réglage fait sur la carte -> curseur
+            readOut();
         }
-        if (reg) vol->UnregisterControlChangeNotify(cb);
-        cb->Release();
+        if (regC) vc->UnregisterControlChangeNotify(cbC);
+        if (regO) vo->UnregisterControlChangeNotify(cbO);
+        cbC->Release(); cbO->Release();
     });
     err = f.get();
     if (!err.empty()) { stop(); return false; }
@@ -652,11 +682,11 @@ bool EndpointVolumeWatch::start(const std::wstring& id, std::string& err) {
 void EndpointVolumeWatch::stop() {
     if (d_->th.joinable()) {
         d_->stop = true;
-        if (d_->ev) SetEvent(d_->ev);
+        if (d_->evWake) SetEvent(d_->evWake);
         d_->th.join();
     }
-    if (d_->ev) { CloseHandle(d_->ev); d_->ev = nullptr; }
-    d_->gain = 1.f; d_->muted = false; d_->db = 0.f;
+    for (HANDLE* h : { &d_->evCable, &d_->evOut, &d_->evWake }) if (*h) { CloseHandle(*h); *h = nullptr; }
+    d_->muted = false; d_->db = 0.f; d_->pct = 100.f; d_->exclusive = false; d_->hwVolume = true;
 }
 
 } // namespace s3d

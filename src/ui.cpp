@@ -115,9 +115,16 @@ static ImVec2 scenePos(ImVec2 c, float R, double az, double el) {
     return ImVec2(c.x - std::sin(a) * r, c.y - std::cos(a) * r);
 }
 
+// Vue de dessus à l'échelle : le grand cercle = 4 m. Une enceinte en hauteur est dessinée à sa
+// distance horizontale (distance x cos élévation).
+static constexpr float kSceneMeters = 4.f;
+static ImVec2 speakerPos(ImVec2 c, float R, const Speaker& sp) {
+    return scenePos(c, R * (float)sp.dist / kSceneMeters, sp.az, sp.el);
+}
+
 struct SceneEdit { bool moved = false, commit = false; };
 
-// L : disposition affichée, modifiable à la souris (glisser une enceinte = nouvel azimut)
+// L : disposition affichée, modifiable à la souris (glisser une enceinte = nouvel azimut et distance)
 static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const float* outLv, float height, float s) {
     SceneEdit ed;
     static int s_drag = -1;
@@ -130,10 +137,11 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
     const float R = std::min(w, height) * 0.36f;
 
     dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + height), u32(kPanel), 10 * s);
-    // anneaux : horizon et 45° d'élévation
+    // anneaux de distance : 1, 2, 3 et 4 m
     for (int k = 4; k >= 1; --k) dl->AddCircleFilled(c, R * (0.25f * k + 0.08f), u32(kAccent, 0.012f * k), 96);
     dl->AddCircle(c, R, u32(kBorder), 128, 1.5f * s);
-    dl->AddCircle(c, R * 0.7071f, u32(kViolet, 0.35f), 96, 1.f * s);
+    if (!L.headphones)
+        for (int k = 1; k <= 3; ++k) dl->AddCircle(c, R * k / kSceneMeters, u32(kBorder, 0.45f), 96, 1.f * s);
     dl->AddLine(ImVec2(c.x - R * 1.08f, c.y), ImVec2(c.x + R * 1.08f, c.y), u32(kBorder, 0.5f), 1.f);
     dl->AddLine(ImVec2(c.x, c.y - R * 1.08f), ImVec2(c.x, c.y + R * 1.08f), u32(kBorder, 0.5f), 1.f);
     ImGui::PushFont(font(F_SMALL));
@@ -141,6 +149,11 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
         const ImVec2 ts = ImGui::CalcTextSize(t);
         dl->AddText(ImVec2(at.x - ts.x * 0.5f, at.y - ts.y * 0.5f), col, t);
     };
+    if (!L.headphones)
+        for (int k = 1; k <= 4; ++k) {
+            char mt[8]; snprintf(mt, sizeof mt, "%d m", k);
+            dl->AddText(ImVec2(c.x + R * k / kSceneMeters * 0.7071f + 3 * s, c.y + R * k / kSceneMeters * 0.7071f), u32(kDim, 0.6f), mt);
+        }
     centered(ImVec2(c.x, c.y - R - 40 * s), u32(kDim), "AVANT");
     centered(ImVec2(c.x, c.y + R + 40 * s), u32(kDim), "ARRIÈRE");
 
@@ -166,7 +179,7 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
     int lfeIdx = -1;
     for (size_t i = 0; i < L.speakers.size(); ++i) {
         if (L.speakers[i].lfe) { lfeIdx = (int)i; continue; }
-        spk[i] = scenePos(c, R, L.speakers[i].az, L.speakers[i].el);
+        spk[i] = speakerPos(c, R, L.speakers[i]);
     }
     const ImVec2 lfePos(p0.x + w - 46 * s, p0.y + height - 40 * s);
     if (lfeIdx >= 0) spk[lfeIdx] = lfePos;
@@ -183,7 +196,7 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
         if (hov >= 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             double az, el; bool lfe;
             if (channelPosition(L.speakers[hov].id, L.mask(), az, el, lfe) && speakerMoveAllowed(L, hov, az)) {
-                L.speakers[hov].az = az; ed.moved = ed.commit = true;
+                L.speakers[hov].az = az; L.speakers[hov].dist = kDefaultSpeakerDist; ed.moved = ed.commit = true;
             }
             s_drag = -1;
         } else if (hov >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -194,11 +207,15 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
             if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 const float dx = mp.x - c.x, dy = mp.y - c.y;
                 if (dx * dx + dy * dy > 1.f) {
+                    auto& sp = L.speakers[s_drag];
                     double az = std::round(std::atan2(-dx, -dy) * 180.0 / kPi);
                     if (az <= -180) az += 360;
-                    if (std::fabs(az - L.speakers[s_drag].az) >= 1.0 && speakerMoveAllowed(L, s_drag, az)) {
-                        L.speakers[s_drag].az = az; ed.moved = true;
-                    }
+                    // distance : rayon horizontal ramené à la distance réelle (enceintes en hauteur)
+                    const double horiz = std::sqrt(dx * dx + dy * dy) / R * kSceneMeters;
+                    double dist = horiz / std::max(0.2, std::cos(sp.el * kPi / 180.0));
+                    dist = std::clamp(std::round(dist * 20.0) / 20.0, kMinSpeakerDist, kMaxSpeakerDist);
+                    if (std::fabs(az - sp.az) >= 1.0 && speakerMoveAllowed(L, s_drag, az)) { sp.az = az; ed.moved = true; }
+                    if (std::fabs(dist - sp.dist) >= 0.049) { sp.dist = dist; ed.moved = true; }
                 }
             } else {
                 ed.commit = true; s_drag = -1;
@@ -207,7 +224,7 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
         if (hov >= 0 || s_drag >= 0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (ed.moved)
             for (size_t i = 0; i < L.speakers.size(); ++i)
-                if (!L.speakers[i].lfe) spk[i] = scenePos(c, R, L.speakers[i].az, L.speakers[i].el);
+                if (!L.speakers[i].lfe) spk[i] = speakerPos(c, R, L.speakers[i]);
     }
 
     // sources (et liaisons vers les enceintes)
@@ -218,7 +235,7 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
             if (src.lfe && L.headphones) continue;
             int col = 0; for (int i = 0; i < sc->inChannels; ++i) if (src.w[i] != 0.f) { col = i; break; }
             const float lv = inLv ? std::min(1.f, (ambi ? inLv[0] : inLv[std::min(col, 31)]) * 1.6f) : 0.f;
-            const ImVec2 sp = src.lfe ? ImVec2(lfePos.x - 34 * s, lfePos.y) : scenePos(c, R * 0.74f, src.az, src.el);
+            const ImVec2 sp = src.lfe ? ImVec2(lfePos.x - 34 * s, lfePos.y) : scenePos(c, R * (L.headphones ? 0.74f : 0.97f), src.az, src.el);
             if (!L.headphones && !sc->matrix.empty()) {
                 for (size_t o = 0; o < L.speakers.size(); ++o) {
                     float g = 0;
@@ -258,12 +275,16 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
             dl->AddCircleFilled(p, hs * 0.45f, u32(kBg, 0.7f), 16);
             const char* nm = shortName(sp.id);
             centered(ImVec2(p.x, p.y + hs + 10 * s), u32(kText, 0.85f), nm);
+            if (dragging) {
+                char dt[48]; snprintf(dt, sizeof dt, "%.0f°  %.2f m", sp.az, sp.dist);
+                centered(ImVec2(p.x, p.y - hs - 12 * s), u32(kOrange), dt);
+            }
             if (ImGui::IsMouseHoveringRect(p - ImVec2(hs, hs), p + ImVec2(hs, hs))) {
                 ImGui::BeginTooltip();
                 ImGui::Text("%s", channelName(sp.id));
-                if (!sp.lfe) ImGui::Text("azimut %.0f°, élévation %.0f°", sp.az, sp.el);
+                if (!sp.lfe) ImGui::Text("azimut %.0f°, élévation %.0f°, distance %.2f m", sp.az, sp.el, sp.dist);
                 ImGui::Text("niveau %.1f dB", 20 * std::log10(std::max(1e-5f, outLv ? outLv[std::min((int)i, 31)] : 0.f)));
-                if (!sp.lfe) ImGui::TextDisabled("glisser : déplacer · double-clic : position d'origine");
+                if (!sp.lfe) ImGui::TextDisabled("glisser : angle et distance · double-clic : position d'origine");
                 ImGui::EndTooltip();
             }
         }
@@ -277,6 +298,8 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
         dl->AddText(ImVec2(lg.x + 96 * s, lg.y), u32(kDim), "enceintes");
         dl->AddRectFilled(ImVec2(lg.x + 172 * s, lg.y + 2 * s), ImVec2(lg.x + 182 * s, lg.y + 12 * s), u32(kViolet), 2 * s);
         dl->AddText(ImVec2(lg.x + 188 * s, lg.y), u32(kDim), "hauteur");
+        const auto al = computeDistanceAlignment(L);
+        if (al.active) dl->AddText(ImVec2(lg.x + 252 * s, lg.y), u32(kGreen), "distances compensées");
     }
     const std::string title = L.headphones ? "Casque — rendu binaural" : "Enceintes — " + L.name;
     dl->AddText(ImVec2(p0.x + 14 * s, p0.y + 10 * s), u32(kDim), title.c_str());
@@ -284,7 +307,7 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
     return ed;
 }
 
-// Mémorise dans les réglages les azimuts qui diffèrent de la position d'origine
+// Mémorise dans les réglages les angles et distances qui diffèrent de la position d'origine
 static void storeSpeakerPositions(Settings& st, const Layout& L) {
     auto o = parseSpeakerOverrides(st.speakerPos);
     auto& m = o[L.name];
@@ -292,7 +315,8 @@ static void storeSpeakerPositions(Settings& st, const Layout& L) {
     for (auto& sp : L.speakers) {
         double az, el; bool lfe;
         if (sp.lfe || !channelPosition(sp.id, L.mask(), az, el, lfe)) continue;
-        if (std::fabs(sp.az - az) >= 0.5) m[sp.id] = sp.az;
+        if (std::fabs(sp.az - az) >= 0.5 || std::fabs(sp.dist - kDefaultSpeakerDist) >= 0.005)
+            m[sp.id] = SpeakerPos{ sp.az, sp.dist };
     }
     if (m.empty()) o.erase(L.name);
     st.speakerPos = formatSpeakerOverrides(o);
@@ -453,7 +477,11 @@ static void liveTab(UiModel& m, UiActions& a, float s) {
             }
             if (m.followVolume) {
                 if (m.windowsMuted) row("Volume Windows", "sourdine (son coupé)", &kAmber);
-                else { snprintf(b, sizeof b, "%.1f dB", m.windowsVolumeDb); row("Volume Windows", b); }
+                else {
+                    snprintf(b, sizeof b, "%.0f %% (%.1f dB) — %s", m.windowsVolumePct, m.windowsVolumeDb,
+                             m.volumeDigital ? "appliqué par Spatial3D" : "synchronisé avec la sortie");
+                    row("Volume Windows", b);
+                }
             }
             snprintf(b, sizeof b, "%.0f ms (point bas %.1f)", m.marginMs, m.lowMs); row("Marge VB-Cable", b);
             snprintf(b, sizeof b, "%+.0f ppm", m.driftPpm); row("Dérive d'horloge", b);
@@ -478,14 +506,14 @@ static void liveTab(UiModel& m, UiActions& a, float s) {
     if (!L.headphones) {
         const bool custom = parseSpeakerOverrides(m.settings.speakerPos).count(L.name) > 0;
         ImGui::PushFont(font(F_SMALL));
-        ImGui::TextDisabled(m.liveRunning ? "Glissez une enceinte pour la placer comme chez vous : le son suit en direct."
-                                          : "Glissez une enceinte pour la placer comme chez vous.");
+        ImGui::TextDisabled(m.liveRunning ? "Glissez une enceinte (angle et distance) pour la placer comme chez vous : le son suit en direct."
+                                          : "Glissez une enceinte (angle et distance) pour la placer comme chez vous.");
         if (custom) {
             ImGui::SameLine();
             if (ImGui::SmallButton("Positions d'origine")) {
                 for (auto& sp : L.speakers) {
                     double az, el; bool lfe;
-                    if (!sp.lfe && channelPosition(sp.id, L.mask(), az, el, lfe)) sp.az = az;
+                    if (!sp.lfe && channelPosition(sp.id, L.mask(), az, el, lfe)) { sp.az = az; sp.dist = kDefaultSpeakerDist; }
                 }
                 ed.moved = ed.commit = true;
             }
@@ -525,7 +553,9 @@ static void settingsTab(UiModel& m, UiActions& a, float s) {
 
     bool autoRoom = m.settings.room < 0;
     ImGui::TextDisabled("Pièce virtuelle (casque)");
-    helpMarker("Un peu de réverbération sort le son de la tête au casque. Automatique : 15 % au casque, rien sur enceintes.");
+    helpMarker("Réflexions d'un salon (murs, sol, plafond) intégrées à chaque haut-parleur virtuel, plus une "
+               "réverbération discrète : c'est ce qui sort le son de la tête. 0 % = écoute anéchoïque. "
+               "Automatique : 15 % au casque, rien sur enceintes.");
     if (ImGui::Checkbox("Automatique##room", &autoRoom)) { m.settings.room = autoRoom ? -1 : 0.15; a.settingsChanged = a.needRestart = true; }
     if (!autoRoom) {
         float r = (float)m.settings.room * 100.f;
@@ -534,18 +564,21 @@ static void settingsTab(UiModel& m, UiActions& a, float s) {
         if (ImGui::IsItemDeactivatedAfterEdit()) a.settingsChanged = a.needRestart = true;
     }
 
-    ImGui::TextDisabled("HRTF mesurée (fichier .sofa)");
-    helpMarker("Au casque, une HRTF mesurée sur une vraie tête donne un placement plus précis que le modèle calculé. "
-               "Fichiers gratuits : bases SADIE II, ARI, HUTUBS (sofacoustics.org).");
-    if (!m.sofaSupported) {
-        ImGui::TextColored(kDim, "Indisponible dans cette version (compilée sans libmysofa).");
-    } else {
-        const std::string cur = m.settings.sofaPath.empty() ? "Aucune — modèle de tête calculé" : m.settings.sofaPath;
+    ImGui::TextDisabled("HRTF (casque)");
+    helpMarker("Par défaut : HRTF mesurée de la tête artificielle KEMAR (MIT Media Lab), égalisée, intégrée au "
+               "programme. Un fichier .sofa mesuré sur une autre tête peut mieux vous correspondre : bases "
+               "gratuites SADIE II, ARI, HUTUBS (sofacoustics.org).");
+    {
+        const std::string cur = m.settings.sofaPath.empty() ? "KEMAR intégrée (mesurée, 710 directions)" : m.settings.sofaPath;
         ImGui::TextWrapped("%s", cur.c_str());
-        if (ImGui::Button("Choisir…")) a.browseSofa = true;
-        if (!m.settings.sofaPath.empty()) {
-            ImGui::SameLine();
-            if (ImGui::Button("Retirer")) { m.settings.sofaPath.clear(); a.settingsChanged = a.needRestart = true; }
+        if (!m.sofaSupported) {
+            ImGui::TextColored(kDim, "Fichiers .sofa : indisponibles dans cette version (compilée sans libmysofa).");
+        } else {
+            if (ImGui::Button("Choisir un .sofa…")) a.browseSofa = true;
+            if (!m.settings.sofaPath.empty()) {
+                ImGui::SameLine();
+                if (ImGui::Button("Revenir à KEMAR")) { m.settings.sofaPath.clear(); a.settingsChanged = a.needRestart = true; }
+            }
         }
     }
     endCard();
@@ -565,10 +598,12 @@ static void settingsTab(UiModel& m, UiActions& a, float s) {
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::SliderInt("##marge", &mg, 5, 100, "%d ms")) m.settings.marginMs = mg;
     if (ImGui::IsItemDeactivatedAfterEdit()) a.settingsChanged = a.needRestart = true;
-    if (ImGui::Checkbox("Suivre le volume et la sourdine de Windows", &m.settings.followCableVolume)) a.settingsChanged = a.needRestart = true;
-    helpMarker("VB-Cable ignore le curseur de volume et le bouton sourdine de Windows : sans cette option, "
-               "couper le son ne coupait rien. Spatial3D les lit sur CABLE Input et les applique lui-même "
-               "(touches de volume du clavier comprises), avec un fondu sans clic.");
+    if (ImGui::Checkbox("Synchroniser le volume avec la sortie réelle", &m.settings.followCableVolume)) a.settingsChanged = a.needRestart = true;
+    helpMarker("VB-Cable ignore le curseur de volume et le bouton sourdine de Windows. Spatial3D recopie "
+               "curseur et sourdine sur votre vraie carte son, dans les deux sens (barre des tâches, touches "
+               "du clavier, panneau de la carte) : même position, même sourdine, et c'est la carte qui règle "
+               "le volume comme sans Spatial3D. En sortie exclusive sur une carte sans volume matériel, "
+               "Spatial3D l'applique lui-même, sans clic.");
     if (ImGui::Checkbox("Latence minimale (périodes WASAPI les plus courtes)", &m.settings.lowLatency)) a.settingsChanged = a.needRestart = true;
     helpMarker("Windows 10/11 : le moteur audio tourne à la période minimale du pilote (souvent 2,7 ms au lieu "
                "de 10 ms), en capture comme en sortie ; en exclusif, période matérielle minimale. Décochez si "

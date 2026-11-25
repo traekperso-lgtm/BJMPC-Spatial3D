@@ -228,6 +228,7 @@ struct LiveEngine::Impl {
     RenderOptions opt;
     int outRate = 48000;
     std::vector<float> xfade;               // rendu du nouveau moteur pendant le fondu
+    DistanceAligner align;                  // distances réelles des enceintes (retard + niveau)
     EndpointVolumeWatch vol;                // volume / sourdine Windows de CABLE Input
     bool followVol = false;
     ~Impl() { delete pending.exchange(nullptr); delete retired.exchange(nullptr); }
@@ -335,15 +336,18 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     d.incoming.assign((size_t)d.capRate * d.capCh, 0.f);
     d.inBuf.assign((size_t)16384 * d.capCh, 0.f);
     d.xfade.assign((size_t)16384 * d.renderer->outChannels(), 0.f);
+    d.align.init(d.renderer->outChannels(), outRate, 0.02);
+    { auto al = computeDistanceAlignment(outL); d.align.setTargets(al.delaySec, al.gain); }
     if (s.followCableVolume) {
         std::string ve;
-        d.followVol = d.vol.start(d.cableIn.id, ve);
+        d.followVol = d.vol.start(d.cableIn.id, d.outEp.id, ve);
         if (!d.followVol && d.warning.empty()) d.warning = ve;
     }
     d.stage.init(d.capCh, d.capRate, outRate, std::clamp(s.marginMs, 5, 200));
     d.marginMs = d.stage.controller().marginMs();
     d.lim.init(outRate, d.renderer->outChannels());
-    d.procMs = 1000.0 * (d.renderer->latencyFrames() + d.lim.latencyFrames()) / outRate;
+    d.procMs = 1000.0 * (d.renderer->latencyFrames() + d.lim.latencyFrames()) / outRate
+             + 1000.0 * AdaptiveResampler::kHalf / d.capRate;
     setGainDb(s.gainDb);
 
     if (!s.keepDefault) {
@@ -388,6 +392,7 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
                     d.renderer.reset(nr);
                 }
             }
+            d.align.process(dst, frames);
             // gain général x volume Windows de CABLE Input (rampe sur le bloc : ni clic ni zip)
             const float g = gain_.load();
             const float volT = d.followVol ? d.vol.gain() : 1.f;
@@ -412,7 +417,11 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
         int bufFrames = 0;
         bool first = true;
         auto pullAndReport = [&](float* dst, size_t frames) -> size_t {
-            if (first) { first = false; d.outBufMs = 1000.0 * bufFrames / outRate; std::lock_guard<std::mutex> lk(d.m); d.outputMode = mode; }
+            if (first) {
+                first = false; d.outBufMs = 1000.0 * bufFrames / outRate;
+                d.vol.setExclusive(mode.rfind("exclusif", 0) == 0);
+                std::lock_guard<std::mutex> lk(d.m); d.outputMode = mode;
+            }
             return pull(dst, frames);
         };
         playWasapi(d.outEp.id, outCh, outMask, outRate, po, pullAndReport, d.stop, e, &mode, &bufFrames);
@@ -459,7 +468,10 @@ LiveEngine::Status LiveEngine::status() const {
     st.inHz = d.inHz;
     st.error = d.error; st.warning = d.warning;
     st.followVolume = d.followVol;
-    if (d.followVol) { st.windowsMuted = d.vol.muted(); st.windowsVolumeDb = d.vol.levelDb(); }
+    if (d.followVol) {
+        st.windowsMuted = d.vol.muted(); st.windowsVolumeDb = d.vol.levelDb();
+        st.windowsVolumePct = d.vol.levelPercent(); st.volumeDigital = d.vol.digital();
+    }
     return st;
 }
 
@@ -473,6 +485,15 @@ bool LiveEngine::moveSpeakers(const Layout& out) {
     if (!d_ || !running_) return false;
     auto& d = *d_;
     if (out.headphones || d.scene.out.headphones || out.speakers.size() != d.scene.out.speakers.size()) return false;
+    { auto al = computeDistanceAlignment(out); d.align.setTargets(al.delaySec, al.gain); }
+    bool sameAngles = true;
+    for (size_t i = 0; i < out.speakers.size(); ++i)
+        if (out.speakers[i].az != d.scene.out.speakers[i].az || out.speakers[i].el != d.scene.out.speakers[i].el) sameAngles = false;
+    if (sameAngles) {                             // seule la distance a changé : pas de nouvelle matrice
+        std::lock_guard<std::mutex> lk(d.m);
+        d.scene.out = out;
+        return true;
+    }
     delete d.retired.exchange(nullptr);           // ancien moteur rendu par le fil audio
     std::string err;
     auto r = makeRenderer(d.sources, d.capCh, out, d.outRate, d.opt, err);

@@ -25,9 +25,15 @@ private:
 };
 
 // Rééchantillonneur multicanal à rapport variable (interpolation d'Hermite)
+// Rééchantillonneur à rapport variable : sinc fenêtrée (Kaiser) polyphase, 48 points, 256 phases
+// interpolées. Bande passante plate jusqu'à ~20 kHz à 48 kHz, repliement < -70 dB, latence 24 éch.
+// (remplace l'interpolation cubique, qui atténuait les aigus et les modulait au gré de la dérive).
 class AdaptiveResampler {
 public:
+    static constexpr int kHalf = 24;          // demi-longueur du filtre (latence en trames d'entrée)
     void init(int channels, size_t capacityFrames = 192000);   // mémoire réservée d'avance
+    // Coupure anti-repliement pour un rapport nominal (entrée / sortie) ; recalcule la table.
+    void setNominalRatio(double ratio);
     void push(const std::vector<float>& interleaved);
     void push(const float* interleaved, size_t frames);
     double available() const;               // trames d'entrée non consommées
@@ -39,6 +45,10 @@ private:
     int ch_ = 2;
     std::vector<float> buf_;
     double pos_ = 1.0;
+    static constexpr int kPhases = 256;
+    std::vector<float> tab_;                  // (kPhases + 1) x 2*kHalf coefficients
+    std::vector<float> coef_;                 // coefficients de la trame en cours
+    void buildTable(double cutoff);
 };
 
 // Régulateur du rapport de rééchantillonnage

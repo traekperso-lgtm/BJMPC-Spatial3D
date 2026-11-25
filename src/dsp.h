@@ -1,5 +1,6 @@
 // Spatial3D — briques DSP : réverbération FDN, limiteur
 #pragma once
+#include <atomic>
 #include <vector>
 #include <cstddef>
 #include <utility>
@@ -26,6 +27,32 @@ private:
 // Désactive les nombres dénormaux (très petits) dans le fil courant : sans cela, la queue d'une
 // réverbération ou d'un filtre qui s'éteint peut ralentir le processeur d'un facteur 10 à 100.
 void enableFlushToZero();
+
+// Alignement temporel et de niveau par enceinte (distances réelles). Retard entier par canal ;
+// tout changement de réglage passe par un fondu enchaîné de 10 ms entre l'ancien et le nouveau
+// point de lecture : déplacer une enceinte en pleine écoute ne fait ni clic ni glissement de hauteur.
+// setTargets() peut être appelé depuis un autre fil que process() (verrou de séquence, sans attente).
+class DistanceAligner {
+public:
+    void init(int channels, double fs, double maxDelaySec = 0.02);
+    void setTargets(const std::vector<double>& delaySec, const std::vector<double>& gain);
+    void process(float* io, size_t frames);      // trames entrelacées, sur place
+    bool active() const { return active_; }
+    int maxDelayFrames() const;
+private:
+    static constexpr int kMaxCh = 32;
+    int ch_ = 0, mask_ = 0, w_ = 0, xfLen_ = 480, maxDelay_ = 960;
+    double fs_ = 48000;
+    std::vector<float> buf_;                      // [position][canal]
+    struct Tap { int delay = 0; float gain = 1; };
+    Tap cur_[kMaxCh], next_[kMaxCh];
+    int xf_ = -1;                                 // position dans le fondu (-1 = aucun)
+    bool active_ = false;
+    // boîte aux lettres : écrite par setTargets, lue par process
+    std::atomic<unsigned> seq_{ 0 };
+    Tap mail_[kMaxCh];
+    unsigned seen_ = 0;
+};
 
 // Limiteur crête lié sur tous les canaux, à anticipation (2 ms) : le gain descend en douceur AVANT
 // la crête (filtre min glissant + moyenne glissante), sans jamais la laisser dépasser le seuil,

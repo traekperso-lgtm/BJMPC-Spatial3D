@@ -31,7 +31,7 @@
 
 using namespace s3d;
 
-static const char* kVersion = "0.5.1";
+static const char* kVersion = "0.6.0";
 static std::atomic<bool> gStop{ false };
 
 #ifdef _WIN32
@@ -66,7 +66,7 @@ static void usage() {
         "  --wav <fichier.wav>     rendu dans un fichier au lieu de la lecture\n"
         "  --etalement <degres>    elargit chaque source (0-90, defaut 0)\n"
         "  --piece <0..1>          piece virtuelle au casque (defaut 0.15)\n"
-        "  --sofa <fichier.sofa>   HRTF mesuree pour le casque (au lieu du modele parametrique)\n"
+        "  --sofa <fichier.sofa>   HRTF mesuree pour le casque (au lieu de la KEMAR integree)\n"
         "  --ambisonique           traite le fichier comme de l'Ambisonique AmbiX (4 ou 9 canaux)\n"
         "  --volume <dB>           gain general (defaut 0)\n"
         "  --info                  affiche l'analyse et le plan de placement sans jouer\n"

@@ -46,7 +46,8 @@ public:
         // latence bout en bout estimée : capture + marge + traitement + limiteur + tampon de sortie
         double capturePeriodMs = 0, processingMs = 0, outputBufferMs = 0, totalLatencyMs = 0;
         bool followVolume = false, windowsMuted = false;   // volume / sourdine Windows de CABLE Input
-        double windowsVolumeDb = 0;
+        double windowsVolumeDb = 0, windowsVolumePct = 100;
+        bool volumeDigital = false;        // appliqué par Spatial3D (exclusif sans volume matériel)
     };
     LiveEngine();
     ~LiveEngine();

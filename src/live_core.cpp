@@ -29,15 +29,49 @@ size_t SpscRing::pop(float* dst, size_t max) {
     return n;
 }
 
+static double besselI0(double x) {
+    double sum = 1, t = 1;
+    for (int k = 1; k < 40; ++k) { t *= (x / (2 * k)) * (x / (2 * k)); sum += t; if (t < 1e-12 * sum) break; }
+    return sum;
+}
+
+void AdaptiveResampler::buildTable(double cutoff) {
+    const int N = 2 * kHalf;
+    const double beta = 7.0, i0b = besselI0(beta);
+    tab_.assign((size_t)(kPhases + 1) * N, 0.f);
+    for (int p = 0; p <= kPhases; ++p) {
+        const double mu = (double)p / kPhases;          // position fractionnaire
+        double sum = 0;
+        float* row = &tab_[(size_t)p * N];
+        for (int k = 0; k < N; ++k) {
+            const double d = (k - (kHalf - 1)) - mu;     // distance au point voulu
+            const double x = d * cutoff;
+            const double sinc = std::fabs(x) < 1e-12 ? 1.0 : std::sin(3.14159265358979323846 * x) / (3.14159265358979323846 * x);
+            const double r = d / kHalf;
+            const double w = std::fabs(r) >= 1 ? 0.0 : besselI0(beta * std::sqrt(1 - r * r)) / i0b;
+            row[k] = (float)(cutoff * sinc * w);
+            sum += row[k];
+        }
+        for (int k = 0; k < N; ++k) row[k] = (float)(row[k] / sum);   // gain continu exactement 1
+    }
+}
+
+void AdaptiveResampler::setNominalRatio(double ratio) {
+    // descente de fréquence : coupure sous la nouvelle fréquence de Nyquist
+    buildTable(0.915 * std::min(1.0, 1.0 / std::max(1e-3, ratio)));
+}
+
 void AdaptiveResampler::init(int channels, size_t capacityFrames) {
     ch_ = channels;
     buf_.reserve(capacityFrames * channels);   // les ajouts suivants ne réallouent pas
+    coef_.assign(2 * kHalf, 0.f);
+    if (tab_.empty()) buildTable(0.915);
     reset();
 }
 
 void AdaptiveResampler::reset() {
-    buf_.assign((size_t)ch_, 0.f);   // une trame de marge pour l'interpolation
-    pos_ = 1.0;
+    buf_.assign((size_t)(kHalf - 1) * ch_, 0.f);   // historique nul pour le filtre
+    pos_ = kHalf - 1;
 }
 
 void AdaptiveResampler::push(const std::vector<float>& x) { buf_.insert(buf_.end(), x.begin(), x.end()); }
@@ -45,31 +79,35 @@ void AdaptiveResampler::push(const float* x, size_t frames) { buf_.insert(buf_.e
 
 double AdaptiveResampler::available() const {
     const double frames = (double)(buf_.size() / ch_);
-    return std::max(0.0, frames - 2.0 - pos_);
+    return std::max(0.0, frames - kHalf - pos_);
 }
 
 size_t AdaptiveResampler::pull(float* out, size_t frames, double ratio) {
     const size_t nIn = buf_.size() / ch_;
+    const int N = 2 * kHalf;
     size_t n = 0;
     for (; n < frames; ++n) {
         const size_t i = (size_t)pos_;
-        if (i + 2 >= nIn) break;                      // plus assez d'entrée
-        const float mu = (float)(pos_ - (double)i);
-        const float* a = &buf_[(i - 1) * ch_];
-        const float* b = a + ch_;
-        const float* c = b + ch_;
-        const float* d = c + ch_;
+        if (i + kHalf >= nIn) break;                     // plus assez d'entrée
+        const double fp = (pos_ - (double)i) * kPhases;
+        const int p = std::min((int)fp, kPhases - 1);
+        const float t = (float)(fp - p);
+        const float* r0 = &tab_[(size_t)p * N];
+        const float* r1 = r0 + N;
+        for (int k = 0; k < N; ++k) coef_[k] = r0[k] + t * (r1[k] - r0[k]);
+        const float* x = &buf_[(i - (kHalf - 1)) * ch_];
         float* o = out + n * ch_;
-        for (int k = 0; k < ch_; ++k) {
-            const float c1 = 0.5f * (c[k] - a[k]);
-            const float c2 = a[k] - 2.5f * b[k] + 2.f * c[k] - 0.5f * d[k];
-            const float c3 = 0.5f * (d[k] - a[k]) + 1.5f * (b[k] - c[k]);
-            o[k] = ((c3 * mu + c2) * mu + c1) * mu + b[k];
+        for (int c = 0; c < ch_; ++c) o[c] = 0.f;
+        for (int k = 0; k < N; ++k) {
+            const float g = coef_[k];
+            const float* xk = x + (size_t)k * ch_;
+            for (int c = 0; c < ch_; ++c) o[c] += g * xk[c];
         }
         pos_ += ratio;
     }
-    // Compactage : on garde une trame avant la position courante
-    const size_t keepFrom = (size_t)pos_ >= 1 ? (size_t)pos_ - 1 : 0;
+    // Compactage : on garde l'historique nécessaire au filtre
+    const size_t ip = (size_t)pos_;
+    const size_t keepFrom = ip >= (size_t)(kHalf - 1) ? ip - (kHalf - 1) : 0;
     if (keepFrom > 0) {
         buf_.erase(buf_.begin(), buf_.begin() + std::min(buf_.size(), keepFrom * ch_));
         pos_ -= (double)keepFrom;
@@ -84,7 +122,7 @@ void AdaptiveResampler::dropOldest(double keep) {
     const size_t nIn = buf_.size() / ch_;
     const size_t from = std::min(nIn, drop);
     buf_.erase(buf_.begin(), buf_.begin() + from * ch_);
-    if (buf_.size() < (size_t)ch_) buf_.assign((size_t)ch_, 0.f);
+    if (buf_.size() < (size_t)(kHalf - 1) * ch_) reset();
 }
 
 void DriftController::init(double inRate, double outRate, double marginMs, double maxMarginMs) {
@@ -117,6 +155,7 @@ void LiveInputStage::init(int channels, double inRate, double outRate, int margi
     ch_ = channels; inRate_ = inRate;
     F_ = std::max(16, (int)std::lround(0.002 * outRate));
     rs_.init(channels, (size_t)(inRate * 2));
+    rs_.setNominalRatio(inRate / outRate);
     old_.reserve((size_t)F_ * channels);
     dc_.init(inRate, outRate, marginMs);
     priming_ = true; fadeIn_ = 0; underruns_ = 0; drops_ = 0;

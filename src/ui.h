@@ -20,7 +20,7 @@ struct UiModel {
     int outputSel = -1;          // index dans outputs (sortie réellement utilisée)
     bool vbCableInstalled = true;
     bool sofaSupported = false;
-    std::string version = "0.5.1";
+    std::string version = "0.6.0";
 
     // Temps réel
     bool liveRunning = false, liveIdle = true, liveStarting = false;
@@ -29,7 +29,8 @@ struct UiModel {
     std::string liveError, liveWarning, liveOutputMode, liveCaptureMode;
     double capturePeriodMs = 0, processingMs = 0, outputBufferMs = 0, totalLatencyMs = 0;
     bool followVolume = false, windowsMuted = false;
-    double windowsVolumeDb = 0;
+    double windowsVolumeDb = 0, windowsVolumePct = 100;
+    bool volumeDigital = false;
     Scene liveScene;
     float liveIn[32] = {}, liveOut[32] = {};
 

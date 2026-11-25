@@ -102,3 +102,87 @@ void Limiter::process(float* x, size_t frames) {
 float Limiter::reductionDb() const { return 20.f * std::log10(std::max(minEnv_, 1e-6f)); }
 
 } // namespace s3d
+
+namespace s3d {
+
+void DistanceAligner::init(int channels, double fs, double maxDelaySec) {
+    ch_ = std::min(channels, kMaxCh); fs_ = fs;
+    maxDelay_ = (int)std::ceil(maxDelaySec * fs);
+    xfLen_ = std::max(1, (int)std::lround(0.010 * fs));
+    int n = 1; while (n < maxDelay_ + 16384 + 2) n <<= 1;
+    mask_ = n - 1; w_ = 0;
+    buf_.assign((size_t)n * ch_, 0.f);
+    for (int c = 0; c < kMaxCh; ++c) cur_[c] = next_[c] = mail_[c] = Tap{};
+    xf_ = -1; active_ = false; seen_ = seq_.load();
+}
+
+int DistanceAligner::maxDelayFrames() const {
+    int m = 0; for (int c = 0; c < ch_; ++c) m = std::max(m, cur_[c].delay); return m;
+}
+
+void DistanceAligner::setTargets(const std::vector<double>& delaySec, const std::vector<double>& gain) {
+    const unsigned s = seq_.load(std::memory_order_relaxed);
+    seq_.store(s + 1, std::memory_order_release);          // impair : écriture en cours
+    std::atomic_thread_fence(std::memory_order_release);
+    for (int c = 0; c < ch_; ++c) {
+        const double d = c < (int)delaySec.size() ? delaySec[c] : 0.0;
+        mail_[c].delay = std::clamp((int)std::lround(d * fs_), 0, maxDelay_);
+        mail_[c].gain = c < (int)gain.size() ? (float)gain[c] : 1.f;
+    }
+    std::atomic_thread_fence(std::memory_order_release);
+    seq_.store(s + 2, std::memory_order_release);           // pair : publié
+}
+
+void DistanceAligner::process(float* io, size_t frames) {
+    if (ch_ == 0) return;
+    // nouveau réglage publié ? (copie seulement s'il n'est pas en cours d'écriture)
+    if (xf_ < 0) {
+        const unsigned s1 = seq_.load(std::memory_order_acquire);
+        if (s1 != seen_ && !(s1 & 1)) {
+            Tap t[kMaxCh];
+            for (int c = 0; c < ch_; ++c) t[c] = mail_[c];
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (seq_.load(std::memory_order_acquire) == s1) {
+                seen_ = s1;
+                bool diff = false;
+                for (int c = 0; c < ch_; ++c) {
+                    next_[c] = t[c];
+                    if (t[c].delay != cur_[c].delay || t[c].gain != cur_[c].gain) diff = true;
+                }
+                if (diff) xf_ = 0;
+            }
+        }
+    }
+    bool any = xf_ >= 0;
+    for (int c = 0; c < ch_ && !any; ++c) any = cur_[c].delay != 0 || cur_[c].gain != 1.f;
+    // la ligne à retard est toujours alimentée, pour qu'un futur réglage parte d'un historique complet
+    for (size_t f = 0; f < frames; ++f) {
+        float* row = &buf_[(size_t)((w_ + f) & mask_) * ch_];
+        for (int c = 0; c < ch_; ++c) row[c] = io[f * ch_ + c];
+    }
+    if (any) {
+        for (size_t f = 0; f < frames; ++f) {
+            const int pos = (int)(w_ + f);
+            float t = 0.f;
+            if (xf_ >= 0) t = (float)(xf_ + 1) / (float)xfLen_;
+            for (int c = 0; c < ch_; ++c) {
+                const float a = buf_[(size_t)((pos - cur_[c].delay) & mask_) * ch_ + c] * cur_[c].gain;
+                float y = a;
+                if (xf_ >= 0) {
+                    const float b = buf_[(size_t)((pos - next_[c].delay) & mask_) * ch_ + c] * next_[c].gain;
+                    y = a + t * (b - a);
+                }
+                io[f * ch_ + c] = y;
+            }
+            if (xf_ >= 0 && ++xf_ >= xfLen_) {
+                for (int c = 0; c < ch_; ++c) cur_[c] = next_[c];
+                xf_ = -1;
+            }
+        }
+    }
+    w_ = (w_ + (int)frames) & mask_;
+    active_ = false;
+    for (int c = 0; c < ch_; ++c) if (cur_[c].delay || cur_[c].gain != 1.f) active_ = true;
+}
+
+} // namespace s3d

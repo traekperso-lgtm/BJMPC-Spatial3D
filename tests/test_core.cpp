@@ -6,6 +6,7 @@
 #include "live_core.h"
 #include "dsp.h"
 #include "convolver.h"
+#include "hrtf_builtin.h"
 #include "wav_reader.h"
 #include "wav_writer.h"
 #include <random>
@@ -336,9 +337,10 @@ static void testWavRoundTrip() {
 
 // Enceintes déplacées à la souris : réglage relu, matrice saine, source envoyée à la bonne enceinte
 static void testSpeakerOverrides() {
-    const std::string spec = formatSpeakerOverrides({ { "5.1", { { CH_FL, 45 }, { CH_FR, -45 }, { CH_SL, 100 } } } });
+    const std::string spec = formatSpeakerOverrides({ { "5.1", { { CH_FL, { 45, 2.0 } }, { CH_FR, { -45 } }, { CH_SL, { 100, 1.2 } } } } });
     auto o = parseSpeakerOverrides(spec);
-    CHECK(o.size() == 1 && o["5.1"].size() == 3 && o["5.1"][CH_SL] == 100, "Positions : texte relu a l'identique");
+    CHECK(o.size() == 1 && o["5.1"].size() == 3 && o["5.1"][CH_SL].az == 100 && std::fabs(o["5.1"][CH_SL].dist - 1.2) < 1e-9 && o["5.1"][CH_FR].dist == kDefaultSpeakerDist,
+          "Positions : texte relu a l'identique (angles et distances)");
     Layout l; layoutFromName("5.1", l);
     applySpeakerOverrides(l, spec);
     CHECK(l.speakers[l.indexOf(CH_FL)].az == 45 && l.speakers[l.indexOf(CH_FR)].az == -45, "Positions : azimuts appliques");
@@ -360,9 +362,102 @@ static void testSpeakerOverrides() {
         if (std::fabs(p - 1.0) > 0.02) ok = false;
     }
     CHECK(ok, "Positions : puissance conservee sur une disposition deplacee");
+    // distances : l'enceinte la plus proche (SL 1,2 m) retardée et atténuée par rapport à la plus loin (2,5 m)
+    auto al = computeDistanceAlignment(l);
+    const int sl = l.indexOf(CH_SL), fr = l.indexOf(CH_FR);
+    CHECK(al.active && std::fabs(al.delaySec[sl] - 1.3 / 343) < 1e-6 && al.delaySec[fr] == 0 &&
+          std::fabs(al.gain[sl] - 1.2 / 2.5) < 1e-6, "Distances : retard et niveau compenses comme un ampli");
     Layout hp; layoutFromName("casque", hp);
     applySpeakerOverrides(hp, spec);
     CHECK(hp.headphones, "Positions : sans effet au casque");
+}
+
+// HRTF KEMAR intégrée : présente, symétrique de face, oreille proche plus forte sur le côté
+static void testBuiltinHrtf() {
+    CHECK(builtinHrirCount() == 710, "HRTF integree : 710 directions mesurees");
+    std::vector<float> L, R;
+    double gaz = 0, gel = 0;
+    CHECK(builtinHrir(0, 0, 48000, L, R, &gaz, &gel) && gaz == 0 && gel == 0, "HRTF integree : direction de face trouvee");
+    double el2 = 0, d2 = 0;
+    for (size_t i = 0; i < L.size(); ++i) { el2 += L[i] * L[i]; d2 += (L[i] - R[i]) * (L[i] - R[i]); }
+    CHECK(d2 < el2 * 0.05, "HRTF integree : face quasi symetrique");
+    builtinHrir(90, 0, 48000, L, R);
+    double eL = 0, eR = 0; for (size_t i = 0; i < L.size(); ++i) { eL += L[i] * L[i]; eR += R[i] * R[i]; }
+    printf("  HRTF KEMAR : %zu points a 48 kHz, ILD large bande a 90 deg %.1f dB\n", L.size(), 10 * std::log10(eL / eR));
+    CHECK(eL > eR * 4, "HRTF integree : oreille gauche dominante pour une source a gauche");
+    std::vector<float> L44, R44;
+    builtinHrir(90, 0, 44100, L44, R44);
+    double s48 = 0, s44 = 0; for (float v : L) s48 += v; for (float v : L44) s44 += v;
+    CHECK(std::fabs(L44.size() - L.size() * 44100.0 / 48000) <= 2 && std::fabs(s44 - s48) < 0.02 * std::fabs(s48) + 1e-3,
+          "HRTF integree : reechantillonnage 44,1 kHz (longueur et gain DC)");
+}
+
+// Alignement des distances : retard exact, puis changement de réglage en fondu sans clic
+static void testDistanceAligner() {
+    const double fs = 48000;
+    DistanceAligner a; a.init(2, fs);
+    a.setTargets({ 0.001, 0.0 }, { 0.5, 1.0 });            // canal 0 : 48 éch. de retard, -6 dB
+    std::vector<float> x(2 * 4800, 0.f);
+    x[2 * 100] = 1.f; x[2 * 100 + 1] = 1.f;                 // impulsion (après le fondu initial ? non : 100 < 480)
+    a.process(x.data(), 4800);
+    // le premier réglage passe aussi par le fondu : on vérifie l'état final sur un second passage
+    std::vector<float> y(2 * 4800, 0.f);
+    y[2 * 1000] = 1.f; y[2 * 1000 + 1] = 1.f;
+    a.process(y.data(), 4800);
+    CHECK(std::fabs(y[2 * 1048] - 0.5f) < 1e-6f && std::fabs(y[2 * 1000 + 1] - 1.f) < 1e-6f && std::fabs(y[2 * 1000]) < 1e-6f,
+          "Distances : retard de 48 echantillons et -6 dB exacts");
+    // sinus continu, retard qui change en cours de route : pas de saut d'un échantillon à l'autre
+    DistanceAligner b; b.init(1, fs);
+    std::vector<float> s(48000);
+    for (size_t n = 0; n < s.size(); ++n) s[n] = (float)std::sin(2 * M_PI_F * 440 * n / fs);
+    float maxStep = 0, prev = 0;
+    for (size_t off = 0; off < s.size(); off += 480) {
+        if (off == 9600) b.setTargets({ 0.0042 }, { 0.8 });
+        if (off == 24000) b.setTargets({ 0.0 }, { 1.0 });
+        b.process(&s[off], 480);
+        for (size_t n = off; n < off + 480; ++n) { if (n > 0) maxStep = std::max(maxStep, std::fabs(s[n] - prev)); prev = s[n]; }
+    }
+    printf("  alignement : pas maximal %.4f (sinus 440 Hz : %.4f)\n", maxStep, (float)(2 * M_PI_F * 440 / fs));
+    CHECK(maxStep < 0.075f, "Distances : reglage modifie en pleine lecture sans clic");
+}
+
+// Rééchantillonneur : fidélité mesurée (sinus pur, rapport non entier comme une dérive d'horloge)
+static double resamplerSnr(double freq, double ratio, double* gainDb) {
+    AdaptiveResampler rs; rs.init(1, 400000); rs.setNominalRatio(ratio);
+    const double fs = 48000;
+    std::vector<float> x(96000);
+    for (size_t n = 0; n < x.size(); ++n) x[n] = (float)(0.5 * std::sin(2 * M_PI_F * freq * n / fs));
+    rs.push(x.data(), x.size());
+    std::vector<float> y(80000);
+    const size_t got = rs.pull(y.data(), y.size(), ratio);
+    // ajustement d'un sinus à la fréquence attendue sur la partie stable, résidu = bruit + distorsion
+    const double w = 2 * M_PI_F * freq * ratio / fs;
+    double ss = 0, cc = 0, sc = 0, ys = 0, yc = 0;
+    const size_t a = 2000, b = std::min(got, (size_t)70000);
+    for (size_t n = a; n < b; ++n) {
+        const double sn = std::sin(w * n), cn = std::cos(w * n);
+        ss += sn * sn; cc += cn * cn; sc += sn * cn; ys += y[n] * sn; yc += y[n] * cn;
+    }
+    const double det = ss * cc - sc * sc;
+    const double A = (ys * cc - yc * sc) / det, B = (yc * ss - ys * sc) / det;
+    double sig = 0, err = 0;
+    for (size_t n = a; n < b; ++n) {
+        const double fit = A * std::sin(w * n) + B * std::cos(w * n);
+        sig += fit * fit; err += (y[n] - fit) * (y[n] - fit);
+    }
+    if (gainDb) *gainDb = 20 * std::log10(std::sqrt(A * A + B * B) / 0.5);
+    return 10 * std::log10(sig / std::max(err, 1e-30));
+}
+
+static void testResamplerFidelity() {
+    double g10 = 0, g18 = 0, g1 = 0;
+    const double s1 = resamplerSnr(1000, 1.00021, &g1);
+    const double s10 = resamplerSnr(10000, 1.00021, &g10);
+    const double s18 = resamplerSnr(18000, 0.99987, &g18);
+    printf("  reechantillonneur : RSB 1 kHz %.0f dB, 10 kHz %.0f dB, 18 kHz %.0f dB ; gain 10 kHz %+.3f dB, 18 kHz %+.3f dB\n",
+           s1, s10, s18, g10, g18);
+    CHECK(s1 > 80 && s10 > 80 && s18 > 70, "Reechantillonneur : rapport signal/bruit > 80 dB (10 kHz)");
+    CHECK(std::fabs(g1) < 0.01 && std::fabs(g10) < 0.05 && std::fabs(g18) < 0.2, "Reechantillonneur : bande passante plate jusqu'a 18 kHz");
 }
 
 int main() {
@@ -377,6 +472,9 @@ int main() {
     testLiveStage();
     testSpscRing();
     testSpeakerOverrides();
+    testBuiltinHrtf();
+    testDistanceAligner();
+    testResamplerFidelity();
     testConvolver();
     testWavRoundTrip();
     printf("%d/%d verifications reussies\n", checks - fails, checks);

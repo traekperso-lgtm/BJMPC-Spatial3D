@@ -61,19 +61,25 @@ private:
     Impl* d_;
 };
 
-// Volume et sourdine Windows d'un périphérique de lecture. VB-Cable affiche un curseur de volume et
-// un bouton sourdine mais ne les applique pas (le son passe tel quel) : Spatial3D lit donc ceux de
-// CABLE Input et les applique lui-même. Suivi par notification dans un fil dédié : aucun appel COM
-// dans le fil audio, qui lit seulement gain().
+// Volume et sourdine synchronisés entre CABLE Input (le périphérique par défaut, que touchent le
+// curseur de la barre des tâches et les touches du clavier) et la sortie réelle (l'appareil maître).
+// VB-Cable ignore volume et sourdine ; on les recopie donc sur la vraie carte, dans les deux sens :
+// même position de curseur, même sourdine, et c'est la carte (ou le mélangeur de Windows) qui
+// applique le volume, exactement comme sans Spatial3D. Seul cas où Spatial3D l'applique lui-même :
+// sortie exclusive sur une carte sans volume matériel (Windows ne l'appliquerait pas).
+// Suivi par notifications dans un fil dédié : aucun appel COM dans le fil audio, qui lit gain().
 class EndpointVolumeWatch {
 public:
     EndpointVolumeWatch();
     ~EndpointVolumeWatch();
-    bool start(const std::wstring& id, std::string& err);
+    bool start(const std::wstring& cableId, const std::wstring& outputId, std::string& err);
     void stop();
-    float gain() const;          // amplitude linéaire à appliquer (0 = sourdine)
-    bool muted() const;
+    void setExclusive(bool on);  // sortie réellement ouverte en exclusif ?
+    float gain() const;          // gain numérique à appliquer par Spatial3D (1 sauf cas exclusif)
+    bool muted() const;          // état de l'appareil maître
     float levelDb() const;
+    float levelPercent() const;  // position du curseur Windows (0..100)
+    bool digital() const;        // volume appliqué par Spatial3D (exclusif sans volume matériel)
 private:
     struct Impl;
     Impl* d_;

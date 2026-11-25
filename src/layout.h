@@ -21,9 +21,13 @@ enum ChannelId : int {
     CH_BFC = 38, CH_BFL = 39, CH_BFR = 40,
 };
 
+constexpr double kDefaultSpeakerDist = 2.5;   // distance d'écoute par défaut (m)
+constexpr double kMinSpeakerDist = 0.5, kMaxSpeakerDist = 5.0;
+
 struct Speaker {
     int id = CH_UNKNOWN;
     double az = 0, el = 0;
+    double dist = kDefaultSpeakerDist;   // distance réelle à l'auditeur (m), réglable à la souris
     bool lfe = false;
 };
 
@@ -45,12 +49,19 @@ std::string describeMask(uint64_t mask);
 std::vector<std::string> knownLayoutNames();
 
 // Positions réelles des enceintes, réglées à la souris dans l'interface.
-// Texte « 5.1|0:35,1:-35;7.1|9:100 » : par disposition, identifiant de canal -> azimut en degrés.
-using SpeakerOverrides = std::map<std::string, std::map<int, double>>;
+// Texte « 5.1|0:35@2.10,1:-35;7.1|9:100 » : par disposition, identifiant de canal -> azimut en degrés
+// et, après @, distance en mètres (absente = distance par défaut).
+struct SpeakerPos { double az = 0, dist = kDefaultSpeakerDist; };
+using SpeakerOverrides = std::map<std::string, std::map<int, SpeakerPos>>;
 SpeakerOverrides parseSpeakerOverrides(const std::string& spec);
 std::string formatSpeakerOverrides(const SpeakerOverrides& o);
 void applySpeakerOverrides(Layout& l, const std::string& spec);   // sans effet au casque
 // Azimut acceptable pour l'enceinte i (au moins 5° de ses voisines de même étage) ?
 bool speakerMoveAllowed(const Layout& l, int i, double az);
+
+// Alignement des distances (comme un ampli home-cinéma) : les enceintes plus proches sont retardées
+// et atténuées pour que tous les sons arrivent ensemble et au même niveau à la place d'écoute.
+struct DistanceAlignment { std::vector<double> delaySec, gain; bool active = false; };
+DistanceAlignment computeDistanceAlignment(const Layout& l);
 
 } // namespace s3d

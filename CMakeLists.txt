@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Spatial3D VERSION 0.5.1 LANGUAGES CXX)
+project(Spatial3D VERSION 0.6.0 LANGUAGES CXX)
 if(WIN32)
   enable_language(RC)
 endif()
@@ -27,9 +27,19 @@ if(WIN32)
   add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
+# ---- HRTF mesurée intégrée (MIT KEMAR égalisée, voir tools/make_hrtf.py) ----
+set(S3D_HRTF_BIN ${CMAKE_CURRENT_SOURCE_DIR}/res/hrtf_kemar_48k.bin)
+set(S3D_HRTF_CPP ${CMAKE_CURRENT_BINARY_DIR}/hrtf_kemar_data.cpp)
+add_custom_command(OUTPUT ${S3D_HRTF_CPP}
+  COMMAND ${CMAKE_COMMAND} -DIN=${S3D_HRTF_BIN} -DOUT=${S3D_HRTF_CPP} -DNAME=kHrtfKemar
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+  DEPENDS ${S3D_HRTF_BIN} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed.cmake
+  COMMENT "Integration de l'HRTF KEMAR")
+
 # ---- Cœur portable (aucune dépendance) ----
 add_library(s3dcore STATIC
-  src/layout.cpp src/vbap.cpp src/sources.cpp src/renderer.cpp src/dsp.cpp src/wav_writer.cpp src/wav_reader.cpp src/live_core.cpp src/convolver.cpp)
+  src/layout.cpp src/vbap.cpp src/sources.cpp src/renderer.cpp src/dsp.cpp src/wav_writer.cpp src/wav_reader.cpp src/live_core.cpp src/convolver.cpp
+  src/hrtf_builtin.cpp ${S3D_HRTF_CPP})
 target_include_directories(s3dcore PUBLIC src)
 if(S3D_WITH_MYSOFA)
   find_package(mysofa CONFIG QUIET)

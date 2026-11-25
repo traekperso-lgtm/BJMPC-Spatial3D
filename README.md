@@ -1,6 +1,6 @@
 # Spatial3D — spatialisation 3D pour Windows
 
-**BJMPC Informatique** · v0.5.1 · C++17
+**BJMPC Informatique** · v0.6.0 · C++17
 
 Spatial3D regarde comment le PC est équipé (casque, stéréo, 5.1, 7.1, 7.1.4…) et place chaque son de
 Windows au meilleur endroit possible sur **ce** matériel, en temps réel. Le moteur est conçu pour être
@@ -15,9 +15,12 @@ Lancez **Spatial3D** (Bureau ou menu Démarrer). Deux onglets :
 - **Temps réel** : un bouton « Activer le son 3D » spatialise tout le son de Windows (jeux, films,
   navigateur, musique) via VB-Cable. À droite, la **vue de la scène** vue de dessus : les sources
   (points orange) et les enceintes (carrés ; violet = hauteur) s'allument avec le son, les traits
-  montrent quelle source alimente quelle enceinte. **Glissez une enceinte** autour de l'auditeur pour
-  la placer comme dans votre pièce : le placement est recalculé en direct (fondu enchaîné, sans clic)
-  et mémorisé par disposition ; double-clic ou « Positions d'origine » pour revenir aux angles ITU.
+  montrent quelle source alimente quelle enceinte. La vue est à l'échelle (anneaux de 1 à 4 m).
+  **Glissez une enceinte** pour la placer comme dans votre pièce, en **angle et en distance** : le
+  placement est recalculé en direct (fondu enchaîné, sans clic) et mémorisé par disposition ; les
+  distances différentes sont **compensées comme sur un ampli home-cinéma** (les enceintes plus proches
+  sont retardées et baissées pour que tout arrive ensemble et au même niveau à votre place).
+  Double-clic ou « Positions d'origine » pour revenir aux angles ITU à 2,5 m.
   En dessous, les VU-mètres d'entrée et de sortie.
   L'état indique la **latence estimée de bout en bout**, la marge, la dérive d'horloge, la fréquence
   reçue, les coupures et les modes WASAPI obtenus (capture et sortie).
@@ -48,13 +51,15 @@ La ligne de commande reste disponible : `spatial3d-cli` (voir plus bas).
      constante. Quand l'enceinte existe à la bonne place, le canal passe tel quel ; sinon une image
      fantôme est créée au bon angle. Des enceintes *imaginaires* ferment la sphère (sons sous l'horizon,
      zénith sans plafonnier). En stéréo, l'arrière est replié vers l'avant comme un downmix classique.
-   - **Casque** → **binaural**. Chaque source virtuelle reçoit sa propre HRTF :
-     modèle de tête sphérique (Brown & Duda : différence de temps entre oreilles, ombre de la tête,
-     échos du pavillon pour la hauteur, assombrissement de l'arrière), ou **HRTF mesurée** au format
-     `.sofa` si l'exe a été compilé avec libmysofa, appliquée par **convolution partitionnée uniforme**
-   (blocs de 128 échantillons : 2,7 ms de latence quelle que soit la longueur des réponses, les deux
-   oreilles calculées en une seule FFT complexe). Une petite pièce virtuelle (réverbération FDN)
-     sort le son de la tête.
+   - **Casque** → **binaural mesuré**. Chaque source virtuelle reçoit la réponse d'une vraie tête :
+     l'**HRTF KEMAR** (MIT Media Lab, 710 directions) est **intégrée au programme**, égalisée en champ
+     diffus (le timbre reste neutre, seule la direction change). Un fichier `.sofa` d'une autre tête
+     peut la remplacer (version compilée avec libmysofa). À chaque haut-parleur virtuel s'ajoutent les
+     **réflexions précoces d'un salon** (murs, sol, plafond, méthode des sources images, chacune avec
+     sa propre direction HRTF), puis une réverbération FDN discrète : le son sort de la tête au lieu
+     de rester « dans le crâne ». Le tout est appliqué par **convolution partitionnée uniforme** (blocs
+     de 128 échantillons : 2,7 ms de latence, les deux oreilles en une seule FFT complexe ; environ 2 %
+     d'un cœur pour du 7.1).
    - **LFE** → caisson s'il existe, sinon avant gauche/droite à −6 dB.
 4. **Sécurité** : limiteur crête en sortie (pas de saturation quand on replie 12 canaux sur 2).
 
@@ -95,14 +100,18 @@ VB-Cable livre le son par paquets irréguliers, et deux cartes son n'ont jamais 
 horloge. Ce que fait Spatial3D pour éviter les pops :
 
 - **rééchantillonnage continu** piloté par un régulateur PI qui vise le *point bas* du tampon (pas sa
-  moyenne) ; correction plafonnée à ±0,2 % (inaudible) ;
+  moyenne) ; correction plafonnée à ±0,2 % (inaudible). Le rééchantillonneur est un **sinc fenêtré
+  Kaiser polyphase** (48 points) : réponse plate à ±0,001 dB jusqu'à 18 kHz et rapport signal/bruit
+  de 93 à 98 dB, là où l'ancienne interpolation cubique tombait à 29 dB à 10 kHz (−2,3 dB à 18 kHz) ;
 - **marge auto-ajustée** : départ à 6 ms, chaque coupure l'augmente, et la marge apprise est
   **mémorisée** pour le lancement suivant ;
 - **fondus de 2 ms** à chaque discontinuité : si le tampon se vide, le son s'éteint en douceur puis
   revient en fondu ; s'il déborde (après une pause ou une sortie de veille), fondu enchaîné ;
-- **volume et sourdine de Windows respectés** : VB-Cable ignore le curseur de volume et le bouton
-  sourdine de *CABLE Input* (le son passait tel quel). Spatial3D les surveille et les applique
-  lui-même, touches de volume du clavier comprises, avec une rampe sans clic (option dans Réglages) ;
+- **volume synchronisé avec la vraie carte** : VB-Cable ignore le curseur de volume et le bouton
+  sourdine de *CABLE Input*. Spatial3D recopie curseur et sourdine sur la sortie réelle **dans les deux
+  sens** (barre des tâches, touches du clavier, panneau de la carte) : même position, même sourdine,
+  et c'est la carte qui règle le volume, comme sans Spatial3D. En exclusif sur une carte sans volume
+  matériel, Spatial3D l'applique lui-même avec une rampe sans clic (option dans Réglages) ;
 - **limiteur à anticipation** (1,5 ms) : le gain baisse *avant* une crête, sans saut ;
 - **transfert capture → rendu sans verrou** (anneau à un producteur et un consommateur) et **aucune
   allocation** dans les fils audio ; dénormaux désactivés (FTZ/DAZ) pour éviter les pics de calcul ;
@@ -217,13 +226,14 @@ Sous Linux (développement du moteur, rendu `--wav` uniquement) :
 | `src/layout.*` | Dispositions (masques identiques à `SPEAKER_*` de Windows) et positions normalisées |
 | `src/sources.*` | Sources virtuelles : 1 par canal, ou décodage Ambisonique |
 | `src/vbap.*` | VBAP 2D/3D, enveloppe convexe, enceintes imaginaires, étalement MDAP |
-| `src/renderer.*` | Rendu enceintes (matrice de gains) et casque (HRTF paramétrique ou SOFA) |
+| `src/renderer.*` | Rendu enceintes (matrice de gains) et casque (HRTF mesurée + réflexions précoces) |
+| `src/hrtf_builtin.*` | HRTF KEMAR intégrée (`res/hrtf_kemar_48k.bin`, fabriquée par `tools/make_hrtf.py`) |
 | `src/convolver.*` | FFT et convolution partitionnée uniforme (overlap-save, bloc de 128) |
 | `src/dsp.*` | Pièce virtuelle FDN, limiteur à anticipation, FTZ/DAZ |
 | `src/wasapi_output.*` | Périphériques Windows, lecture et capture WASAPI (IAudioClient3 faible latence, exclusif), réglage 7.1 et sortie par défaut (IPolicyConfig) |
 | `src/live.*` | Mode temps réel : VB-Cable → moteur → vraie sortie, restauration à la fermeture |
-| `src/live_core.*` | Anneau SPSC, rééchantillonneur adaptatif, régulateur de dérive d'horloge (portable, testé) |
-| `tests/test_core.cpp` | 51 vérifications (positions d’enceintes, identités, downmix, hauteurs, Ambisonique, ITD/ILD, dérive, limiteur, absence de clics, anneau, convolution, WAV) |
+| `src/live_core.*` | Anneau SPSC, rééchantillonneur sinc polyphase, régulateur de dérive d'horloge (portable, testé) |
+| `tests/test_core.cpp` | 61 vérifications (HRTF, distances, fidélité du rééchantillonneur, positions d’enceintes, identités, downmix, hauteurs, Ambisonique, ITD/ILD, dérive, limiteur, absence de clics, anneau, convolution, WAV) |
 
 ## Limites connues
 
@@ -239,3 +249,8 @@ Sous Linux (développement du moteur, rendu `--wav` uniquement) :
 - Calibration : angles et distances réels des enceintes (retards et niveaux)
 - Suivi de tête (webcam ou capteur) pour le casque
 - Pilote de carte son virtuelle maison (sans VB-Cable, jusqu'au 7.1.4) — nécessite une signature Microsoft
+
+## Crédits
+
+HRTF : *Bill Gardner et Keith Martin, « HRTF Measurements of a KEMAR Dummy-Head Microphone », MIT Media
+Lab, 1994* — données fournies sans restriction d'usage, citation des auteurs demandée.

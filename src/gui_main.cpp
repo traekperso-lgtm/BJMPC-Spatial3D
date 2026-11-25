@@ -284,6 +284,7 @@ void updateModel() {
     g_m.liveOutputMode = st.outputMode;
     g_m.liveCaptureMode = st.captureMode;
     g_m.followVolume = st.followVolume; g_m.windowsMuted = st.windowsMuted; g_m.windowsVolumeDb = st.windowsVolumeDb;
+    g_m.windowsVolumePct = st.windowsVolumePct; g_m.volumeDigital = st.volumeDigital;
     g_m.capturePeriodMs = st.capturePeriodMs; g_m.processingMs = st.processingMs;
     g_m.outputBufferMs = st.outputBufferMs; g_m.totalLatencyMs = st.totalLatencyMs;
     g_m.liveError = !g_liveStartError.empty() ? g_liveStartError : st.error;

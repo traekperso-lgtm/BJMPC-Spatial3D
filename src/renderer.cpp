@@ -2,9 +2,11 @@
 #include "dsp.h"
 #include "vbap.h"
 #include "convolver.h"
+#include "hrtf_builtin.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <functional>
 #include <cstdio>
 #include <sstream>
 
@@ -219,44 +221,118 @@ static int lastAbove(const std::vector<float>& h, float relThr) {
 }
 #endif
 
+// Pièce virtuelle « casque » : réflexions précoces d'une pièce de salon (méthode des sources images,
+// 1er ordre) intégrées à la réponse de chaque haut-parleur virtuel. C'est ce qui sort le son de la
+// tête : une HRTF seule, anéchoïque, sonne souvent « dans le crâne ».
+struct EarlyReflection { double az, el, delaySec, gain; };
+static std::vector<EarlyReflection> shoeboxReflections(double az, double el, double dist) {
+    // pièce 5,6 x 4,6 x 2,7 m ; auditeur assis à 1,2 m, un peu en arrière du centre
+    const double xf = 2.9, xb = -2.7, yl = 2.3, yr = -2.3, zf = -1.2, zc = 1.5;   // murs relatifs à l'auditeur
+    const Vec3 u = dirVec(az, el);
+    dist = std::min(dist, 2.2);
+    Vec3 S{ u.x * dist, u.y * dist, u.z * dist };
+    S.x = std::clamp(S.x, xb + 0.2, xf - 0.2); S.y = std::clamp(S.y, yr + 0.2, yl - 0.2); S.z = std::clamp(S.z, zf + 0.2, zc - 0.2);
+    const double d0 = std::sqrt(S.x * S.x + S.y * S.y + S.z * S.z);
+    const Vec3 img[6] = { { 2 * xf - S.x, S.y, S.z }, { 2 * xb - S.x, S.y, S.z }, { S.x, 2 * yl - S.y, S.z },
+                          { S.x, 2 * yr - S.y, S.z }, { S.x, S.y, 2 * zf - S.z }, { S.x, S.y, 2 * zc - S.z } };
+    const double refl[6] = { 0.55, 0.6, 0.6, 0.6, 0.45, 0.5 };   // rideaux/canapé, murs, tapis, plafond
+    std::vector<EarlyReflection> r;
+    for (int k = 0; k < 6; ++k) {
+        const Vec3& p = img[k];
+        const double d = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        const double raz = std::atan2(p.y, p.x) * 180 / kPi, rel = std::asin(std::clamp(p.z / d, -1.0, 1.0)) * 180 / kPi;
+        r.push_back({ raz, rel, (d - d0) / 343.0, refl[k] * d0 / d });
+    }
+    return r;
+}
+
 class BinauralRenderer : public Renderer {
 public:
     bool init(const std::vector<VirtualSource>& src, int inCh, double fs, const RenderOptions& opt, std::string& err) {
         in_ = inCh; src_ = src; opt_ = opt; fs_ = fs;
         for (size_t i = 0; i < src.size(); ++i) (src[i].lfe ? lfe_ : spatial_).push_back((int)i);
+        // Source des réponses : fichier .sofa choisi, sinon HRTF KEMAR intégrée
+        std::function<bool(double, double, std::vector<float>&, std::vector<float>&)> hrir;
+#ifdef S3D_WITH_MYSOFA
+        MYSOFA_EASY* easy = nullptr;
+        float sofaR = 1.f;
+#endif
         if (!opt.sofaPath.empty()) {
 #ifdef S3D_WITH_MYSOFA
             int len = 0, e = 0;
-            MYSOFA_EASY* easy = mysofa_open(opt.sofaPath.c_str(), (float)fs, &len, &e);
+            easy = mysofa_open(opt.sofaPath.c_str(), (float)fs, &len, &e);
             if (!easy) { err = "Impossible d'ouvrir le fichier SOFA (code " + std::to_string(e) + ")"; return false; }
             const float* sp = easy->hrtf->SourcePosition.values;
-            const float r = std::sqrt(sp[0] * sp[0] + sp[1] * sp[1] + sp[2] * sp[2]);
-            std::vector<std::vector<float>> hl, hr;
-            for (int i : spatial_) {
-                const Vec3 p = dirVec(src[i].az, src[i].el);
-                std::vector<float> L(len), R(len);
+            sofaR = std::sqrt(sp[0] * sp[0] + sp[1] * sp[1] + sp[2] * sp[2]);
+            sofaLen_ = len;
+            hrir = [&, len](double az, double el, std::vector<float>& L, std::vector<float>& R) {
+                const Vec3 p = dirVec(az, el);
+                L.assign(len, 0.f); R.assign(len, 0.f);
                 float dl = 0, dr = 0;
-                mysofa_getfilter_float(easy, (float)(p.x * r), (float)(p.y * r), (float)(p.z * r), L.data(), R.data(), &dl, &dr);
-                // Retards éventuels du fichier intégrés aux réponses, queue sous -70 dB coupée
+                mysofa_getfilter_float(easy, (float)(p.x * sofaR), (float)(p.y * sofaR), (float)(p.z * sofaR), L.data(), R.data(), &dl, &dr);
                 const int tail = std::max(lastAbove(L, 3e-4f), lastAbove(R, 3e-4f)) + 1;
                 L.resize(tail); R.resize(tail);
                 L.insert(L.begin(), (size_t)std::max(0L, std::lround(dl * fs)), 0.f);
                 R.insert(R.begin(), (size_t)std::max(0L, std::lround(dr * fs)), 0.f);
-                hl.push_back(std::move(L)); hr.push_back(std::move(R));
-            }
-            conv_.init(hl, hr, 128);   // blocs de 128 : 2,7 ms à 48 kHz
-            // le convolueur travaille par blocs : latence d'un bloc
-            outFifo_.assign((size_t)conv_.block() * 2, 0.f);
-            inFifo_.reserve((size_t)16384 * in_);           // pas d'allocation dans le fil audio
-            outFifo_.reserve((size_t)16384 * 2);
-            mysofa_close(easy);
-            useSofa_ = true;
-            sofaLen_ = len;
+                return true;
+            };
+            hrtfName_ = "SOFA";
 #else
-            err = "Ce binaire a ete compile sans libmysofa : option --sofa indisponible";
+            err = "Ce binaire a ete compile sans libmysofa : choisissez l'HRTF integree (aucun fichier .sofa)";
             return false;
 #endif
         } else {
+            hrir = [fs](double az, double el, std::vector<float>& L, std::vector<float>& R) {
+                return builtinHrir(az, el, fs, L, R);
+            };
+            sofaLen_ = 0;
+            hrtfName_ = "KEMAR integree";
+        }
+        // Réponse binaurale de chaque haut-parleur virtuel : direct + réflexions précoces
+        const double early = std::clamp(opt.room / 0.15, 0.0, 1.5);
+        std::vector<std::vector<float>> hl, hr;
+        std::vector<float> L, R, rl, rr;
+        bool ok = true;
+        for (int i : spatial_) {
+            if (!hrir(src[i].az, src[i].el, L, R)) { ok = false; break; }
+            if (early > 0) {
+                double e2 = 1;
+                const auto refl = shoeboxReflections(src[i].az, src[i].el, 2.0);
+                size_t need = L.size();
+                for (auto& r : refl) need = std::max(need, L.size() + (size_t)std::lround(r.delaySec * fs) + 1);
+                L.resize(need, 0.f); R.resize(need, 0.f);
+                for (auto& r : refl) {
+                    if (!hrir(r.az, r.el, rl, rr)) continue;
+                    const double g = r.gain * early;
+                    e2 += g * g;
+                    // matériaux : un peu d'aigu absorbé à chaque réflexion (passe-bas 1 pôle ~7 kHz)
+                    const float a = (float)std::exp(-2 * kPi * 7000.0 / fs);
+                    float yl = 0, yr = 0;
+                    const size_t off = (size_t)std::lround(r.delaySec * fs);
+                    for (size_t n = 0; n < rl.size() && off + n < need; ++n) {
+                        yl = (1 - a) * rl[n] + a * yl; yr = (1 - a) * rr[n] + a * yr;
+                        L[off + n] += (float)g * yl; R[off + n] += (float)g * yr;
+                    }
+                }
+                // même sonie qu'en anéchoïque
+                const float norm = (float)(1.0 / std::sqrt(e2));
+                for (auto& v : L) v *= norm;
+                for (auto& v : R) v *= norm;
+            }
+            hl.push_back(L); hr.push_back(R);
+        }
+#ifdef S3D_WITH_MYSOFA
+        if (easy) mysofa_close(easy);
+#endif
+        if (ok) {
+            conv_.init(hl, hr, 128);   // blocs de 128 : 2,7 ms à 48 kHz
+            outFifo_.assign((size_t)conv_.block() * 2, 0.f);   // latence d'un bloc
+            inFifo_.reserve((size_t)16384 * in_);              // pas d'allocation dans le fil audio
+            outFifo_.reserve((size_t)16384 * 2);
+            useSofa_ = true;
+            irLen_ = hl.empty() ? 0 : (int)hl[0].size();
+        } else {
+            // repli : modèle paramétrique de tête sphérique (données intégrées illisibles)
             for (int i : spatial_) {
                 const Vec3 p = dirVec(src[i].az, src[i].el);
                 ParamEar l, r;
@@ -264,6 +340,7 @@ public:
                 r.init(fs, p, false, src[i].az, src[i].el);
                 param_.push_back({ l, r });
             }
+            hrtfName_.clear();
         }
         room_.init(fs);
         return true;
@@ -326,7 +403,7 @@ public:
     int latencyFrames() const override { return useSofa_ ? conv_.block() : 0; }
     std::string describe() const override {
         std::ostringstream ss;
-        ss << "Rendu casque binaural (" << (useSofa_ ? "HRTF mesuree SOFA, " + std::to_string(sofaLen_) + " points, latence " + std::to_string(conv_.block()) + " ech." : std::string("HRTF parametrique tete spherique"))
+        ss << "Rendu casque binaural (" << (useSofa_ ? "HRTF mesuree " + hrtfName_ + ", reponse " + std::to_string(irLen_) + " points avec reflexions precoces, latence " + std::to_string(conv_.block()) + " ech." : std::string("HRTF parametrique tete spherique"))
            << ", piece " << (int)std::lround(opt_.room * 100) << " %)\n";
         for (int i : spatial_) {
             char b[96]; snprintf(b, sizeof b, "  %-18s -> source virtuelle az %4.0f el %3.0f\n", src_[i].label.c_str(), src_[i].az, src_[i].el);
@@ -351,8 +428,9 @@ private:
     std::vector<std::pair<ParamEar, ParamEar>> param_;
     PartitionedConvolver conv_;
     std::vector<const float*> vkp_;
-    bool useSofa_ = false;
-    int sofaLen_ = 0;
+    bool useSofa_ = false;        // convolution de réponses mesurées (KEMAR intégrée ou .sofa)
+    int sofaLen_ = 0, irLen_ = 0;
+    std::string hrtfName_;
     RoomReverb room_;
     std::vector<float> v_, mono_, inFifo_, outFifo_, blockOut_;
     std::vector<std::vector<float>> vk_;

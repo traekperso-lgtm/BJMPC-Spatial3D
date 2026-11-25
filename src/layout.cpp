@@ -155,8 +155,13 @@ SpeakerOverrides parseSpeakerOverrides(const std::string& spec) {
         for (std::string kv; std::getline(ps, kv, ',');) {
             const size_t c = kv.find(':');
             if (c == std::string::npos) continue;
-            const double az = atof(kv.c_str() + c + 1);
-            if (std::isfinite(az)) m[atoi(kv.c_str())] = az;
+            SpeakerPos p;
+            p.az = atof(kv.c_str() + c + 1);
+            const size_t at = kv.find('@', c);
+            if (at != std::string::npos) p.dist = atof(kv.c_str() + at + 1);
+            if (!std::isfinite(p.az) || !std::isfinite(p.dist)) continue;
+            p.dist = std::min(kMaxSpeakerDist, std::max(kMinSpeakerDist, p.dist));
+            m[atoi(kv.c_str())] = p;
         }
         if (m.empty()) o.erase(part.substr(0, bar));
     }
@@ -170,8 +175,12 @@ std::string formatSpeakerOverrides(const SpeakerOverrides& o) {
         if (!s.empty()) s += ';';
         s += name + '|';
         bool first = true;
-        for (auto& [id, az] : m) {
-            char b[32]; snprintf(b, sizeof b, "%s%d:%.0f", first ? "" : ",", id, az);
+        for (auto& [id, p] : m) {
+            char b[48];
+            if (std::fabs(p.dist - kDefaultSpeakerDist) >= 0.005)
+                snprintf(b, sizeof b, "%s%d:%.0f@%.2f", first ? "" : ",", id, p.az, p.dist);
+            else
+                snprintf(b, sizeof b, "%s%d:%.0f", first ? "" : ",", id, p.az);
             s += b; first = false;
         }
     }
@@ -192,8 +201,9 @@ void applySpeakerOverrides(Layout& l, const std::string& spec) {
     for (int i = 0; i < (int)l.speakers.size(); ++i) {
         auto& sp = l.speakers[i];
         auto f = it->second.find(sp.id);
-        if (sp.lfe || f == it->second.end()) continue;
-        if (speakerMoveAllowed(l, i, f->second)) sp.az = wrapAz(f->second);
+        if (f == it->second.end()) continue;
+        sp.dist = f->second.dist;
+        if (!sp.lfe && speakerMoveAllowed(l, i, f->second.az)) sp.az = wrapAz(f->second.az);
     }
 }
 
@@ -205,6 +215,22 @@ bool speakerMoveAllowed(const Layout& l, int i, double az) {
         if (std::fabs(wrapAz(o.az - az)) < 5) return false;
     }
     return true;
+}
+
+DistanceAlignment computeDistanceAlignment(const Layout& l) {
+    DistanceAlignment a;
+    const size_t n = l.speakers.size();
+    a.delaySec.assign(n, 0.0); a.gain.assign(n, 1.0);
+    if (l.headphones || n == 0) return a;
+    double dmax = 0;
+    for (auto& sp : l.speakers) dmax = std::max(dmax, sp.dist);
+    for (size_t i = 0; i < n; ++i) {
+        const double d = l.speakers[i].dist;
+        a.delaySec[i] = (dmax - d) / 343.0;          // vitesse du son à 20 °C
+        a.gain[i] = d / dmax;                         // niveau en 1/r : la plus proche baisse
+        if (std::fabs(dmax - d) > 0.005) a.active = true;
+    }
+    return a;
 }
 
 } // namespace s3d
