@@ -8,7 +8,8 @@
 namespace s3d {
 
 struct Settings {
-    std::wstring outputId;            // vraie sortie ; vide = mémorisée / par défaut (hors VB-Cable)
+    std::wstring outputId;            // vraie sortie imposée (ligne de commande --vers, non mémorisée) ;
+                                      // vide = celle de Windows (voir resolveOutput)
     std::string layout = "auto";      // auto, casque, 2.0, 5.1, 7.1, 7.1.4...
     double spreadDeg = 0;
     double room = -1;                 // -1 = auto (15 % au casque, 0 sur enceintes)

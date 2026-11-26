@@ -15,6 +15,7 @@
 #include <propidl.h>
 #include <avrt.h>
 #include <endpointvolume.h>
+#include <audiopolicy.h>
 #include <cstdio>
 #include <algorithm>
 #include <cmath>
@@ -35,6 +36,8 @@ static const GUID kIID_IAudioEndpointVolumeCallback = { 0x657804FA, 0xD6AD, 0x44
 static const GUID kIID_IUnknownS3D = { 0x00000000, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
 static const GUID kIID_IAudioRenderClient   = { 0xF294ACFC, 0x3146, 0x4483, { 0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2 } };
 static const GUID kIID_IAudioCaptureClient  = { 0xC8ADBD64, 0xE71E, 0x48A0, { 0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17 } };
+static const GUID kIID_IAudioSessionManager2 = { 0x77AA99A0, 0x1BD6, 0x484F, { 0x8B, 0xC7, 0x2C, 0x65, 0x4C, 0x9A, 0x9B, 0x6F } };
+static const GUID kIID_IAudioSessionControl2 = { 0xBFB7FF88, 0x7239, 0x4FC9, { 0x8F, 0xA2, 0x07, 0xC9, 0x50, 0xBE, 0x9C, 0x6D } };
 static const GUID kSUBTYPE_IEEE_FLOAT       = { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
 static const GUID kSUBTYPE_PCM              = { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
 static const GUID kCLSID_PolicyConfigClient = { 0x870AF99C, 0x171D, 0x4F9E, { 0xAF, 0x0D, 0xE6, 0x3D, 0xF4, 0x0C, 0x2B, 0xC9 } };
@@ -197,6 +200,54 @@ bool getEndpoint(const std::wstring& id, bool capture, Endpoint& out, std::strin
     fillInfo(dev.p, capture, defaultId(capture), out);
     if (!out.mixChannels) { err = "Format du peripherique illisible : " + out.name; return false; }
     return true;
+}
+
+std::wstring defaultOutputId() {
+    ComInit com;
+    return defaultId(false);
+}
+
+static std::string processName(DWORD pid) {
+    std::string r;
+    if (HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        wchar_t buf[MAX_PATH]; DWORD n = MAX_PATH;
+        if (QueryFullProcessImageNameW(h, 0, buf, &n)) {
+            const std::wstring p(buf, n);
+            const size_t k = p.find_last_of(L"\\/");
+            r = toUtf8(k == std::wstring::npos ? p : p.substr(k + 1));
+        }
+        CloseHandle(h);
+    }
+    if (r.empty()) { char b[40]; snprintf(b, sizeof b, "processus %lu", (unsigned long)pid); r = b; }
+    return r;
+}
+
+std::vector<std::string> appsPlayingOn(const std::wstring& id) {
+    std::vector<std::string> out;
+    ComInit com;
+    ComPtr<IMMDevice> dev;
+    if (FAILED(openDevice(id, false, dev))) return out;
+    ComPtr<IAudioSessionManager2> mgr;
+    if (FAILED(dev->Activate(kIID_IAudioSessionManager2, CLSCTX_ALL, nullptr, (void**)&mgr))) return out;
+    ComPtr<IAudioSessionEnumerator> en;
+    if (FAILED(mgr->GetSessionEnumerator(&en))) return out;
+    int n = 0;
+    en->GetCount(&n);
+    const DWORD self = GetCurrentProcessId();
+    for (int i = 0; i < n; ++i) {
+        ComPtr<IAudioSessionControl> ctl;
+        if (FAILED(en->GetSession(i, &ctl))) continue;
+        AudioSessionState st = AudioSessionStateInactive;
+        if (FAILED(ctl->GetState(&st)) || st != AudioSessionStateActive) continue;   // flux ouvert et démarré
+        ComPtr<IAudioSessionControl2> c2;
+        if (FAILED(ctl->QueryInterface(kIID_IAudioSessionControl2, (void**)&c2))) continue;
+        if (c2->IsSystemSoundsSession() == S_OK) continue;      // « ding » de Windows : passager
+        DWORD pid = 0;
+        if (FAILED(c2->GetProcessId(&pid)) || pid == 0 || pid == self) continue;
+        const std::string nm = processName(pid);
+        if (std::find(out.begin(), out.end(), nm) == out.end()) out.push_back(nm);
+    }
+    return out;
 }
 
 bool listEndpoints(bool capture, std::vector<Endpoint>& out, std::string& err) {

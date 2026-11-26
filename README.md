@@ -1,6 +1,6 @@
 # Spatial3D — spatialisation 3D pour Windows
 
-**BJMPC Informatique** · v0.7.0 · C++17
+**BJMPC Informatique** · v0.7.1 · C++17
 
 Spatial3D regarde comment le PC est équipé (casque, stéréo, 5.1, 7.1, 7.1.4…) et place chaque son de
 Windows au meilleur endroit possible sur **ce** matériel, en temps réel. Le moteur est conçu pour être
@@ -13,9 +13,12 @@ et périodes WASAPI minimales.
 Lancez **Spatial3D** (Bureau ou menu Démarrer). **Une seule fenêtre**, sans onglets :
 
 - **À gauche** : le bouton « Activer le son 3D » (tout le son de Windows passe par Spatial3D via
-  VB-Cable), la sortie audio et la disposition (automatique, casque, 5.1…), un état condensé
+  VB-Cable), la sortie audio utilisée et la disposition (automatique, casque, 5.1…), un état condensé
   (latence, volume, coupures, mode WASAPI — le détail dans les infobulles) et des **Options**
   repliées : WASAPI (latence minimale, sortie exclusive, bascule de la sortie Windows), démarrage.
+- **La sortie audio ne se choisit pas dans Spatial3D** : il prend celle choisie dans Windows (icône
+  haut-parleur de la barre des tâches, ou Paramètres > Son) et la suit. Pendant le son 3D, choisissez
+  une autre sortie dans Windows : Spatial3D y bascule le son 3D et remet VB-Cable par défaut.
 - **À droite** : la **scène** vue de dessus, à l'échelle (anneaux de 1 à 4 m), avec les VU-mètres.
   - **Enceintes** : glissez-en une en **angle et en distance** pour la placer comme dans votre
     pièce ; les distances sont **compensées comme sur un ampli home-cinéma** (retard + niveau).
@@ -87,7 +90,9 @@ spatialise vers la vraie carte son.
 
 Au lancement (bouton « Activer le son 3D », ou `spatial3d-cli --temps-reel`) :
 1. VB-Cable est passé en 7.1 si besoin (une autorisation administrateur peut être demandée la 1re fois) ;
-2. la sortie actuelle est mémorisée comme « vraie sortie », VB-Cable devient la sortie par défaut ;
+2. la sortie par défaut de Windows devient la « vraie sortie » (mémorisée pour pouvoir la rendre),
+   VB-Cable devient la sortie par défaut. Choisir ensuite une autre sortie dans Windows y déplace
+   le son 3D ;
 3. le son est capté, spatialisé et envoyé à la vraie sortie ;
 4. **fermer la fenêtre (ou Ctrl+C) remet la vraie sortie par défaut.** Après un plantage :
    menu Démarrer > Spatial3D > *Spatial3D - retablir le son* (`spatial3d-cli --restaurer`), ou
@@ -129,9 +134,12 @@ horloge. Ce que fait Spatial3D pour éviter les pops :
   Repli automatique sur les périodes standard si le pilote ne le permet pas ;
 - **priorité « Pro Audio »** (MMCSS) pour les fils audio : un jeu qui charge le processeur ne les
   retarde plus ;
-- **sortie WASAPI exclusive** en option (Réglages > Temps réel, ou `--exclusif`) : Spatial3D parle
-  directement à la carte son, sans le mélangeur de Windows ; repli automatique en partagé si la carte
-  refuse (déjà utilisée, exclusif interdit dans ses propriétés).
+- **sortie WASAPI exclusive** en option (Options > WASAPI, ou `--exclusif`) : Spatial3D parle
+  directement à la carte son, sans le mélangeur de Windows. Elle n'est **proposée que si aucune autre
+  application ne joue sur cette sortie** : si un lecteur, un jeu ou une visio y envoie déjà du son,
+  Spatial3D passe en mode partagé et envoie le son 3D sur cette sortie, mélangé par Windows avec
+  le leur, au lieu de les faire taire (l'infobulle WASAPI indique quelle application). Repli
+  automatique en partagé aussi si la carte refuse (exclusif interdit dans ses propriétés).
 
 **Vérifier le mode WASAPI** : l'état (onglet Temps réel) affiche le format réellement envoyé, par exemple
 « exclusif — entier 24 bits, 48000 Hz, 2 canaux, période 3.0 ms (directement à la carte son) » ou
@@ -145,7 +153,7 @@ c'est VB-Cable qui décroche (augmentez sa latence dans son panneau, *VB-Audio V
 Panel*). Simulations : 10 min, paquets de 0 à 40 ms et dérive de 150 ppm → 1 coupure au démarrage puis
 aucune ; calages et afflux provoqués → coupures et sauts sans aucun clic.
 
-Options : `--vers "Realtek"` (choisir la vraie sortie, mémorisée), `--latence 40` (marge de départ plus
+Options : `--vers "Realtek"` (imposer une autre vraie sortie que celle de Windows, pour cette session), `--latence 40` (marge de départ plus
 grande), `--sortie casque`, `--garder-sortie` (ne pas toucher à la sortie par défaut),
 `--peripheriques` (liste des périphériques), `--exclusif` (sortie WASAPI exclusive),
 `--latence-standard` (périodes WASAPI de 10 ms).

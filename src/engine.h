@@ -30,7 +30,9 @@ struct Meters {
     static void feed(std::atomic<float>* m, const float* x, size_t frames, int ch);
 };
 
-// Sortie réelle à utiliser (id réglé, sinon mémorisé, sinon défaut si ce n'est pas VB-Cable)
+// Sortie réelle à utiliser : Spatial3D ne choisit pas, il suit Windows. Ordre : id imposé (ligne de
+// commande --vers), sinon la sortie par défaut de Windows si ce n'est pas VB-Cable, sinon la dernière
+// vraie sortie mémorisée (pendant le son 3D, la sortie par défaut est VB-Cable).
 bool resolveOutput(const Settings& s, Endpoint& out, std::string& err);
 Layout layoutFor(const Settings& s, const Endpoint& e);
 Layout layoutForEndpoint(const Endpoint& e);
@@ -48,13 +50,17 @@ public:
         bool followVolume = false, windowsMuted = false;   // volume / sourdine Windows de CABLE Input
         double windowsVolumeDb = 0, windowsVolumePct = 100;
         bool volumeDigital = false;        // appliqué par Spatial3D (exclusif sans volume matériel)
+        std::wstring outputId;             // vraie sortie utilisée
+        std::wstring cableId;              // CABLE Input (sortie par défaut pendant le son 3D)
     };
     LiveEngine();
     ~LiveEngine();
     LiveEngine(const LiveEngine&) = delete;
     LiveEngine& operator=(const LiveEngine&) = delete;
     bool start(const Settings& s, std::string& err);
-    void stop();                       // remet la vraie sortie par défaut
+    // remet la vraie sortie par défaut (restoreDefault = false : l'utilisateur vient d'en choisir une
+    // autre dans Windows, on ne l'écrase pas)
+    void stop(bool restoreDefault = true);
     bool running() const { return running_; }
     Status status() const;
     Scene scene() const;

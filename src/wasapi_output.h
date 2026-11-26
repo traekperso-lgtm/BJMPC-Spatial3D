@@ -26,6 +26,12 @@ struct Endpoint {
 bool listEndpoints(bool capture, std::vector<Endpoint>& out, std::string& err);
 bool getEndpoint(const std::wstring& id, bool capture, Endpoint& out, std::string& err);   // id vide = défaut
 inline bool queryDefaultDevice(Endpoint& out, std::string& err) { return getEndpoint(L"", false, out, err); }
+// Identifiant de la sortie par défaut de Windows (vide si aucune) : lecture légère, sans ouvrir le format
+std::wstring defaultOutputId();
+
+// Applications (hors Spatial3D et sons système) qui jouent en ce moment sur cette sortie, par nom
+// d'exécutable (« vlc.exe »…). Vide = sortie libre : le mode exclusif n'y coupera personne.
+std::vector<std::string> appsPlayingOn(const std::wstring& id);
 
 // Lecture : `pull` remplit `frames` trames entrelacées et renvoie le nombre produit (0 = fin)
 using PullFn = std::function<size_t(float* dst, size_t frames)>;

@@ -64,8 +64,7 @@ Settings loadSettings() {
     }
     auto num = [&](const char* k, double def) { auto it = kv.find(k); return it == kv.end() ? def : atof(it->second.c_str()); };
     auto flag = [&](const char* k, bool def) { auto it = kv.find(k); return it == kv.end() ? def : it->second == "1"; };
-    if (kv.count("sortie")) s.outputId = fromUtf8(kv["sortie"]);
-    else s.outputId = loadSavedOutput();
+    // « sortie= » des anciennes versions ignorée : la vraie sortie est celle choisie dans Windows
     if (kv.count("disposition")) s.layout = kv["disposition"];
     if (kv.count("sofa")) s.sofaPath = kv["sofa"];
     s.spreadDeg = num("etalement", 0);
@@ -85,8 +84,7 @@ Settings loadSettings() {
 
 void saveSettings(const Settings& s) {
     std::ostringstream o;
-    o << "sortie=" << toUtf8(s.outputId) << "\n"
-      << "disposition=" << s.layout << "\n"
+    o << "disposition=" << s.layout << "\n"
       << "sofa=" << s.sofaPath << "\n"
       << "etalement=" << s.spreadDeg << "\n"
       << "piece=" << s.room << "\n"
@@ -101,7 +99,6 @@ void saveSettings(const Settings& s) {
       << "fermer_dans_zone_notif=" << (s.closeToTray ? 1 : 0) << "\n"
       << "demarrer_avec_windows=" << (s.startWithWindows ? 1 : 0) << "\n";
     writeFile(appDataDir() + L"\\config.ini", o.str());
-    if (!s.outputId.empty()) saveOutput(s.outputId);
 }
 
 void setStartWithWindows(bool on, const std::wstring& args) {
@@ -154,8 +151,9 @@ bool resolveOutput(const Settings& s, Endpoint& out, std::string& err) {
         for (auto& e : v) if (!id.empty() && e.id == id && !e.isVbCable()) { out = e; return true; }
         return false;
     };
-    if (pick(s.outputId) || pick(loadSavedOutput())) return true;
+    if (pick(s.outputId)) return true;
     for (auto& e : v) if (e.isDefault && !e.isVbCable()) { out = e; return true; }
+    if (pick(loadSavedOutput())) return true;
     for (auto& e : v) if (!e.isVbCable()) { out = e; return true; }
     err = "Aucune sortie audio reelle trouvee";
     return false;
@@ -237,6 +235,7 @@ struct LiveEngine::Impl {
     size_t histW = 0;
     EndpointVolumeWatch vol;                // volume / sourdine Windows de CABLE Input
     bool followVol = false;
+    std::string exclBusy;                   // applis qui jouent déjà sur la sortie : pas d'exclusif
     ~Impl() { delete pending.exchange(nullptr); delete retired.exchange(nullptr); }
     SpscRing ring;                         // capture -> rendu, sans verrou
     std::promise<void> go;                 // la capture démarre une fois le moteur prêt
@@ -364,6 +363,14 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
         if (setDefaultEndpoint(d.cableIn.id, e2)) d.switched = true;
         else d.warning = e2 + " - choisissez CABLE Input comme sortie dans vos applications.";
     }
+    // Exclusif seulement sur une sortie libre : si une autre application y joue encore (réglée sur cette
+    // carte précisément, ou sortie par défaut non basculée), Spatial3D envoie le son en partagé sur
+    // cette sortie, mélangé par Windows avec elle, au lieu de la faire taire. Vérifié après la bascule
+    // sur VB-Cable, le temps que les applications qui suivent la sortie par défaut l'aient quittée.
+    if (s.exclusive) {
+        if (d.switched) std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        for (auto& a : appsPlayingOn(d.outEp.id)) d.exclBusy += (d.exclBusy.empty() ? "" : ", ") + a;
+    }
 
     const int outCh = d.renderer->outChannels();
     const uint32_t outMask = (uint32_t)(outL.mask() & 0xFFFFFFFFu);
@@ -433,13 +440,14 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
             return frames;
         };
         std::string e, mode;
-        PlayOptions po; po.bufferMs = 20; po.exclusive = d.set.exclusive; po.lowLatency = d.set.lowLatency;
+        PlayOptions po; po.bufferMs = 20; po.exclusive = d.set.exclusive && d.exclBusy.empty(); po.lowLatency = d.set.lowLatency;
         int bufFrames = 0;
         bool first = true;
         auto pullAndReport = [&](float* dst, size_t frames) -> size_t {
             if (first) {
                 first = false; d.outBufMs = 1000.0 * bufFrames / outRate;
                 d.vol.setExclusive(mode.rfind("exclusif", 0) == 0);
+                if (!d.exclBusy.empty()) mode += " (exclusif non pris : " + d.exclBusy + " joue déjà sur cette sortie)";
                 std::lock_guard<std::mutex> lk(d.m); d.outputMode = mode;
             }
             return pull(dst, frames);
@@ -452,14 +460,15 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     return true;
 }
 
-void LiveEngine::stop() {
+void LiveEngine::stop(bool restoreDefault) {
     if (!d_) return;
     auto& d = *d_;
     d.stop = true; d.capStop = true;
     if (d.renderThread.joinable()) d.renderThread.join();
     if (d.capThread.joinable()) d.capThread.join();
     d.vol.stop();
-    if (d.switched) { std::string e; setDefaultEndpoint(d.outEp.id, e); d.switched = false; }
+    if (d.switched && restoreDefault) { std::string e; setDefaultEndpoint(d.outEp.id, e); }
+    d.switched = false;
     running_ = false;
     meters.reset();
 }
@@ -488,6 +497,7 @@ LiveEngine::Status LiveEngine::status() const {
     st.inHz = d.inHz;
     st.error = d.error; st.warning = d.warning;
     st.followVolume = d.followVol;
+    st.outputId = d.outEp.id; st.cableId = d.cableIn.id;
     if (d.followVol) {
         st.windowsMuted = d.vol.muted(); st.windowsVolumeDb = d.vol.levelDb();
         st.windowsVolumePct = d.vol.levelPercent(); st.volumeDigital = d.vol.digital();

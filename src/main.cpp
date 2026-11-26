@@ -31,7 +31,7 @@
 
 using namespace s3d;
 
-static const char* kVersion = "0.7.0";
+static const char* kVersion = "0.7.1";
 static std::atomic<bool> gStop{ false };
 
 #ifdef _WIN32
@@ -73,7 +73,7 @@ static void usage() {
         "  --dispositions          liste les dispositions connues\n\n"
         "Temps reel :\n"
         "  --temps-reel            capte VB-Cable (7.1) et spatialise vers la vraie sortie\n"
-        "  --vers <nom>            vraie sortie (partie du nom ; memorisee pour la suite)\n"
+        "  --vers <nom>            vraie sortie (partie du nom ; defaut : celle de Windows)\n"
         "  --entree <nom>          autre entree que VB-Cable\n"
         "  --latence <ms>          marge initiale (defaut 6, augmente seule si coupure)\n"
         "  --garder-sortie         ne pas basculer la sortie par defaut de Windows sur VB-Cable\n"

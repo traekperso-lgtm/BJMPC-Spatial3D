@@ -8,7 +8,7 @@ namespace s3d {
 
 struct LiveArgs {
     std::string inputName;        // (réservé) autre entrée que VB-Cable
-    std::string outputName;       // vraie sortie (partie du nom ; mémorisée)
+    std::string outputName;       // vraie sortie imposée (partie du nom) ; vide = celle de Windows
     std::string sortie = "auto";  // disposition forcée
     std::string sofa;
     double spread = 0, room = -1, gainDb = 0;

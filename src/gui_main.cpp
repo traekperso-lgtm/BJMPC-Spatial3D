@@ -187,7 +187,7 @@ void startLiveAsync() {
     });
 }
 
-void stopLive() {
+void stopLive(bool restoreDefault = true) {
     if (g_liveStart.valid()) { g_liveStartError = g_liveStart.get(); }
     // la marge apprise devient le point de départ (moins de pops au prochain démarrage)
     const auto st = g_live.status();
@@ -195,7 +195,21 @@ void stopLive() {
         g_m.settings.marginMs = std::min(30, (int)st.marginMs);   // marge apprise, plafonnée
         saveSettings(g_m.settings);
     }
-    g_live.stop();
+    g_live.stop(restoreDefault);
+}
+
+// Spatial3D suit la sortie choisie dans Windows : si l'utilisateur en sélectionne une autre (barre des
+// tâches, Paramètres > Son) pendant le son 3D, le moteur repart sur celle-ci et VB-Cable redevient la
+// sortie par défaut. Appelé régulièrement, fenêtre visible ou non.
+void followWindowsOutput() {
+    if (g_liveStart.valid() || !g_live.running()) return;
+    const auto st = g_live.status();
+    const std::wstring def = defaultOutputId();
+    if (def.empty() || def == st.outputId || def == st.cableId) return;
+    Endpoint e; std::string err;
+    if (!getEndpoint(def, false, e, err) || e.isVbCable()) return;
+    stopLive(false);              // ne pas remettre l'ancienne sortie : Windows vient d'en choisir une autre
+    startLiveAsync();             // resolveOutput prend la nouvelle sortie par défaut
 }
 
 std::wstring fileDialog(const wchar_t* filter, const wchar_t* title) {
@@ -234,7 +248,7 @@ void applyActions(const UiActions& a) {
     if (a.restoreSound) {
         stopLive();
         std::string err;
-        const std::wstring id = !g_m.settings.outputId.empty() ? g_m.settings.outputId : loadSavedOutput();
+        const std::wstring id = loadSavedOutput();
         if (!id.empty()) setDefaultEndpoint(id, err);
     }
     if (a.openVbCableSite) ShellExecuteW(nullptr, L"open", L"https://vb-audio.com/Cable/", nullptr, nullptr, SW_SHOWNORMAL);
@@ -246,20 +260,26 @@ void applyActions(const UiActions& a) {
 void refreshDevices() {
     std::vector<Endpoint> v; std::string err;
     listEndpoints(false, v, err);
-    g_m.outputs.clear();
     g_m.vbCableInstalled = false;
-    for (auto& e : v) {
-        if (e.isVbCable()) { g_m.vbCableInstalled = true; continue; }
-        UiDevice d;
-        d.name = e.name; d.id = e.id; d.headphones = e.headphones;
-        d.layoutName = e.headphones ? "casque" : layoutForEndpoint(e).name;
-        g_m.outputs.push_back(d);
-    }
+    for (auto& e : v) if (e.isVbCable()) g_m.vbCableInstalled = true;
+    // Sortie affichée : celle que Spatial3D utilise (en direct) ou utilisera (celle de Windows)
     Endpoint cur;
-    if (resolveOutput(g_m.settings, cur, err)) {
-        g_m.outputSel = -1;
-        for (int i = 0; i < (int)g_m.outputs.size(); ++i) if (g_m.outputs[i].id == cur.id) g_m.outputSel = i;
+    const auto st = g_live.status();
+    bool found = false;
+    if (st.running && !st.outputId.empty()) {
+        for (auto& e : v) if (e.id == st.outputId) { cur = e; found = true; break; }
+    }
+    if (!found) found = resolveOutput(g_m.settings, cur, err);
+    if (found) {
+        g_m.outputName = cur.name;
+        g_m.outputLayoutName = cur.headphones ? "casque" : layoutForEndpoint(cur).name;
         g_m.previewLayout = layoutFor(g_m.settings, cur);
+        // Applis qui occupent la sortie (hors Spatial3D). Avant l'activation, celles qui jouent sur la
+        // sortie par défaut vont passer sur VB-Cable : elles ne comptent que si Windows n'est pas basculé.
+        if (st.running || g_m.settings.keepDefault) g_m.outputBusyBy = appsPlayingOn(cur.id);
+        else g_m.outputBusyBy.clear();
+    } else {
+        g_m.outputName.clear(); g_m.outputLayoutName.clear(); g_m.outputBusyBy.clear();
     }
 }
 
@@ -443,13 +463,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
     // interface simplifiée : le volume se règle dans Windows (synchronisé avec la carte), pas de gain caché
     g_m.settings.gainDb = 0; g_m.settings.followCableVolume = true;
     g_m.settings.marginMs = std::min(g_m.settings.marginMs, 30);
+    g_m.settings.outputId.clear();      // pas de sortie imposée : celle de Windows
     g_m.sofaSupported = sofaSupported();
     refreshDevices();
     if (!tray) { ShowWindow(g_hwnd, nShow); UpdateWindow(g_hwnd); }
     if (g_m.settings.liveOnLaunch) startLiveAsync();
 
     auto lastRefresh = std::chrono::steady_clock::now();
-    auto lastInput = lastRefresh, lastFrame = lastRefresh;
+    auto lastInput = lastRefresh, lastFrame = lastRefresh, lastFollow = lastRefresh;
     bool done = false;
     while (!done) {
         const bool visible = IsWindowVisible(g_hwnd) && !IsIconic(g_hwnd);
@@ -479,6 +500,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
         if (g_pendingShow) { showWindow(); g_pendingShow = false; }
 
         const auto now = std::chrono::steady_clock::now();
+        if (now - lastFollow > std::chrono::seconds(1)) { followWindowsOutput(); lastFollow = now; }
         if (visible && now - lastRefresh > std::chrono::seconds(3)) { refreshDevices(); lastRefresh = now; }
         updateModel();
         if (!visible) continue;

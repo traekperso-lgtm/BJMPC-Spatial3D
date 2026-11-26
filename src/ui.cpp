@@ -423,21 +423,16 @@ static const char* kLayoutKeys[] = { "auto", "casque", "2.0", "2.1", "3.0", "qua
 static const char* kLayoutLabels[] = { "Automatique", "Casque (binaural)", "Stéréo 2.0", "2.1", "3.0", "Quadriphonie", "5.0", "5.1", "7.1",
                                         "5.1.2 (hauteurs)", "5.1.4 (hauteurs)", "7.1.2 (hauteurs)", "7.1.4 (hauteurs)" };
 
-static void outputCombos(UiModel& m, UiActions& a) {
-    std::string cur = m.outputSel >= 0 && m.outputSel < (int)m.outputs.size()
-                          ? m.outputs[m.outputSel].name + "  ·  " + m.outputs[m.outputSel].layoutName : "Aucune sortie";
+static void outputSection(UiModel& m, UiActions& a) {
+    // La sortie n'est pas choisie ici : Spatial3D suit celle de Windows (icône haut-parleur de la barre
+    // des tâches, ou Paramètres > Son). Changer de sortie dans Windows y déplace le son 3D.
     ImGui::TextDisabled("Sortie audio");
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::BeginCombo("##sortie", cur.c_str())) {
-        for (int i = 0; i < (int)m.outputs.size(); ++i) {
-            const std::string lbl = m.outputs[i].name + "  ·  " + m.outputs[i].layoutName;
-            if (ImGui::Selectable(lbl.c_str(), i == m.outputSel)) {
-                m.outputSel = i; m.settings.outputId = m.outputs[i].id;
-                a.settingsChanged = a.needRestart = true;
-            }
-        }
-        ImGui::EndCombo();
-    }
+    helpMarker("Spatial3D utilise la sortie choisie dans Windows (icône haut-parleur de la barre des tâches, "
+               "ou Paramètres > Son) et la suit : choisissez-en une autre dans Windows, le son 3D y passe. "
+               "Pendant le son 3D, Windows affiche « CABLE Input » : c'est normal, le son passe par Spatial3D.");
+    if (m.outputName.empty()) ImGui::TextColored(kAmber, "Aucune sortie audio réelle");
+    else if (m.outputLayoutName.empty()) ImGui::TextWrapped("%s", m.outputName.c_str());
+    else ImGui::TextWrapped("%s  ·  %s", m.outputName.c_str(), m.outputLayoutName.c_str());
     int li = 0;
     for (int i = 0; i < IM_ARRAYSIZE(kLayoutKeys); ++i) if (m.settings.layout == kLayoutKeys[i]) li = i;
     ImGui::TextDisabled("Disposition");
@@ -472,10 +467,22 @@ static void optionsSection(UiModel& m, UiActions& a) {
     helpMarker("Windows 10/11 : le moteur audio tourne à la période minimale du pilote (souvent 2,7 ms au lieu "
                "de 10 ms), en capture comme en sortie ; en exclusif, période matérielle minimale. Décochez si "
                "un vieux pilote produit des craquements.");
-    if (ImGui::Checkbox("Sortie exclusive", &m.settings.exclusive)) a.settingsChanged = a.needRestart = true;
-    helpMarker("Spatial3D parle directement à la carte son, sans le mélangeur de Windows : latence plus faible "
-               "et moins de risques de pops. La carte est alors réservée à Spatial3D. Repli automatique en "
-               "mode partagé si la carte refuse.");
+    // Exclusif proposé seulement sur une sortie libre : si une autre application y joue déjà, Spatial3D
+    // envoie le son en partagé sur cette sortie (mélangé par Windows) au lieu de lui couper le son.
+    if (m.outputBusyBy.empty()) {
+        if (ImGui::Checkbox("Sortie exclusive", &m.settings.exclusive)) a.settingsChanged = a.needRestart = true;
+        helpMarker("Spatial3D parle directement à la carte son, sans le mélangeur de Windows : latence plus faible "
+                   "et moins de risques de pops. La carte est alors réservée à Spatial3D. Proposé seulement quand "
+                   "aucune autre application ne joue sur cette sortie ; repli automatique en mode partagé si la "
+                   "carte refuse.");
+    } else {
+        std::string who;
+        for (auto& n : m.outputBusyBy) who += (who.empty() ? "" : ", ") + n;
+        ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+        ImGui::TextWrapped("Sortie exclusive non proposée : %s joue déjà sur cette sortie. Spatial3D y envoie le "
+                           "son en mode partagé, avec elle.", who.c_str());
+        ImGui::PopStyleColor();
+    }
     if (ImGui::Checkbox("Ne pas basculer la sortie Windows", &m.settings.keepDefault)) a.settingsChanged = a.needRestart = true;
     helpMarker("Cochez si vous préférez choisir « CABLE Input » vous-même dans chaque application.");
     ImGui::Spacing();
@@ -521,7 +528,7 @@ static void mainView(UiModel& m, UiActions& a, float s) {
     ImGui::Spacing();
 
     beginCard("##out");
-    outputCombos(m, a);
+    outputSection(m, a);
     endCard();
     ImGui::Spacing();
 

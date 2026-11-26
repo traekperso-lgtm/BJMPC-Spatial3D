@@ -53,8 +53,7 @@ int runLive(const LiveArgs& a, std::atomic<bool>& stop) {
         for (auto& e : outs)
             if (!e.isVbCable() && lower(e.name).find(lower(a.outputName)) != std::string::npos) { real = &e; break; }
         if (!real) { fprintf(stderr, "Erreur : aucune sortie ne contient '%s' (voir --peripheriques)\n", a.outputName.c_str()); return 1; }
-        s.outputId = real->id;
-        saveSettings(s);
+        s.outputId = real->id;            // pour cette session seulement
     }
     s.layout = a.sortie; s.sofaPath = a.sofa; s.spreadDeg = a.spread; s.room = a.room; s.gainDb = a.gainDb;
     if (a.latencyMs != 6) s.marginMs = a.latencyMs;      // sinon : marge apprise mémorisée

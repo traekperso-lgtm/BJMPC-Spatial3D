@@ -7,20 +7,15 @@
 
 namespace s3d {
 
-struct UiDevice {
-    std::string name;
-    std::wstring id;
-    bool headphones = false;
-    std::string layoutName;      // disposition détectée (« 7.1 », « casque »…)
-};
-
 struct UiModel {
     Settings settings;           // modifiable par l'interface
-    std::vector<UiDevice> outputs;
-    int outputSel = -1;          // index dans outputs (sortie réellement utilisée)
+    // Vraie sortie : celle choisie dans Windows, Spatial3D la suit (aucun choix dans l'interface)
+    std::string outputName;      // vide = aucune sortie réelle trouvée
+    std::string outputLayoutName;            // disposition détectée (« 7.1 », « casque »…)
+    std::vector<std::string> outputBusyBy;   // applis qui y jouent déjà : exclusif non proposé
     bool vbCableInstalled = true;
     bool sofaSupported = false;
-    std::string version = "0.7.0";
+    std::string version = "0.7.1";
 
     // Temps réel
     bool liveRunning = false, liveIdle = true, liveStarting = false;
