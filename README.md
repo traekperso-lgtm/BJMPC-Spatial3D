@@ -29,8 +29,8 @@ Lancez **Spatial3D** (Bureau ou menu Démarrer). Deux onglets :
   la sortie Windows) et démarrage (avec Windows, son 3D au lancement, zone de notification).
   Le reste est réglé pour la fidélité, sans curseur : image nette (aucun étalement), pièce virtuelle
   automatique au casque seulement, marge apprise toute seule, volume réglé dans Windows et
-  synchronisé avec la carte. En ligne de commande, `--etalement`, `--piece` et `--sofa` restent
-  disponibles.
+  synchronisé avec la carte. Pour le rendu de fichiers WAV en ligne de commande,
+  `--etalement`, `--piece` et `--sofa` restent disponibles.
 
 Pour lire un film ou une musique, utilisez votre lecteur habituel (par exemple BJMPC Player) :
 Spatial3D spatialise tout ce que joue Windows.
