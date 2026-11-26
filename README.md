@@ -55,9 +55,7 @@ La ligne de commande reste disponible : `spatial3d-cli` (voir plus bas).
      zénith sans plafonnier). En stéréo, l'arrière est replié vers l'avant comme un downmix classique.
    - **Casque** → **binaural mesuré**. Chaque source virtuelle reçoit la réponse d'une vraie tête :
      l'**HRTF KEMAR** (MIT Media Lab, 710 directions) est **intégrée au programme**, égalisée en champ
-     diffus (le timbre reste neutre, seule la direction change). Entre deux directions mesurées, les trois réponses
-     voisines sont alignées puis mélangées (écart de temps entre oreilles continu) : un haut-parleur
-     virtuel tombe exactement à l'angle voulu. Entre deux directions mesurées, les trois
+     diffus (le timbre reste neutre, seule la direction change). Entre deux directions mesurées, les trois
      réponses voisines sont alignées puis mélangées (écart de temps entre oreilles continu, à
      l'échantillon près) : un haut-parleur virtuel tombe exactement à l'angle voulu. Un fichier `.sofa` d'une autre tête
      peut la remplacer (version compilée avec libmysofa). À chaque haut-parleur virtuel s'ajoutent les
