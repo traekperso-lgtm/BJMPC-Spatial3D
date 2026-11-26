@@ -393,13 +393,6 @@ static void outputCombos(UiModel& m, UiActions& a) {
     }
 }
 
-static void volumeSlider(UiModel& m, UiActions& a) {
-    ImGui::TextDisabled("Volume");
-    float g = (float)m.settings.gainDb;
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::SliderFloat("##vol", &g, -24.f, 12.f, "%+.1f dB")) { m.settings.gainDb = g; a.gainChanged = true; }
-    if (ImGui::IsItemDeactivatedAfterEdit()) a.settingsChanged = true;
-}
 
 static void statusPill(const char* text, const ImVec4& col) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -451,7 +444,6 @@ static void liveTab(UiModel& m, UiActions& a, float s) {
     ImGui::Spacing();
     beginCard("##liveout");
     outputCombos(m, a);
-    volumeSlider(m, a);
     endCard();
 
     ImGui::Spacing();
@@ -535,75 +527,13 @@ static void settingsTab(UiModel& m, UiActions& a, float s) {
     const float colW = two ? (avail - ImGui::GetStyle().ItemSpacing.x) * 0.5f : avail;
     ImGui::BeginChild("##setcol", ImVec2(colW, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
 
-    beginCard("##s1");
-    sectionTitle("Sortie");
-    outputCombos(m, a);
-    endCard();
-    ImGui::Spacing();
-
-    beginCard("##s2");
-    sectionTitle("Rendu");
-    float sp = (float)m.settings.spreadDeg;
-    ImGui::TextDisabled("Étalement des sources");
-    helpMarker("0° : chaque son est une image précise. Plus d'étalement = sons plus larges et enveloppants, "
-               "utile avec peu d'enceintes ou pour la musique.");
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::SliderFloat("##spread", &sp, 0.f, 90.f, "%.0f°")) m.settings.spreadDeg = sp;
-    if (ImGui::IsItemDeactivatedAfterEdit()) a.settingsChanged = a.needRestart = true;
-
-    bool autoRoom = m.settings.room < 0;
-    ImGui::TextDisabled("Pièce virtuelle (casque)");
-    helpMarker("Réflexions d'un salon (murs, sol, plafond) intégrées à chaque haut-parleur virtuel, plus une "
-               "réverbération discrète : c'est ce qui sort le son de la tête. 0 % = écoute anéchoïque. "
-               "Automatique : 15 % au casque, rien sur enceintes.");
-    if (ImGui::Checkbox("Automatique##room", &autoRoom)) { m.settings.room = autoRoom ? -1 : 0.15; a.settingsChanged = a.needRestart = true; }
-    if (!autoRoom) {
-        float r = (float)m.settings.room * 100.f;
-        ImGui::SetNextItemWidth(-FLT_MIN);
-        if (ImGui::SliderFloat("##room", &r, 0.f, 100.f, "%.0f %%")) m.settings.room = r / 100.f;
-        if (ImGui::IsItemDeactivatedAfterEdit()) a.settingsChanged = a.needRestart = true;
-    }
-
-    ImGui::TextDisabled("HRTF (casque)");
-    helpMarker("Par défaut : HRTF mesurée de la tête artificielle KEMAR (MIT Media Lab), égalisée, intégrée au "
-               "programme. Un fichier .sofa mesuré sur une autre tête peut mieux vous correspondre : bases "
-               "gratuites SADIE II, ARI, HUTUBS (sofacoustics.org).");
-    {
-        const std::string cur = m.settings.sofaPath.empty() ? "KEMAR intégrée (mesurée, 710 directions)" : m.settings.sofaPath;
-        ImGui::TextWrapped("%s", cur.c_str());
-        if (!m.sofaSupported) {
-            ImGui::TextColored(kDim, "Fichiers .sofa : indisponibles dans cette version (compilée sans libmysofa).");
-        } else {
-            if (ImGui::Button("Choisir un .sofa…")) a.browseSofa = true;
-            if (!m.settings.sofaPath.empty()) {
-                ImGui::SameLine();
-                if (ImGui::Button("Revenir à KEMAR")) { m.settings.sofaPath.clear(); a.settingsChanged = a.needRestart = true; }
-            }
-        }
-    }
-    endCard();
-    ImGui::Spacing();
-
     if (two) {
         ImGui::EndChild();
         ImGui::SameLine();
         ImGui::BeginChild("##setcol2", ImVec2(colW, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     }
     beginCard("##s3");
-    sectionTitle("Temps réel");
-    int mg = m.settings.marginMs;
-    ImGui::TextDisabled("Marge de départ");
-    helpMarker("Latence de sécurité entre VB-Cable et la carte son. Elle augmente seule à chaque coupure "
-               "et la valeur apprise est gardée pour la prochaine fois.");
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    if (ImGui::SliderInt("##marge", &mg, 5, 100, "%d ms")) m.settings.marginMs = mg;
-    if (ImGui::IsItemDeactivatedAfterEdit()) a.settingsChanged = a.needRestart = true;
-    if (ImGui::Checkbox("Synchroniser le volume avec la sortie réelle", &m.settings.followCableVolume)) a.settingsChanged = a.needRestart = true;
-    helpMarker("VB-Cable ignore le curseur de volume et le bouton sourdine de Windows. Spatial3D recopie "
-               "curseur et sourdine sur votre vraie carte son, dans les deux sens (barre des tâches, touches "
-               "du clavier, panneau de la carte) : même position, même sourdine, et c'est la carte qui règle "
-               "le volume comme sans Spatial3D. En sortie exclusive sur une carte sans volume matériel, "
-               "Spatial3D l'applique lui-même, sans clic.");
+    sectionTitle("WASAPI");
     if (ImGui::Checkbox("Latence minimale (périodes WASAPI les plus courtes)", &m.settings.lowLatency)) a.settingsChanged = a.needRestart = true;
     helpMarker("Windows 10/11 : le moteur audio tourne à la période minimale du pilote (souvent 2,7 ms au lieu "
                "de 10 ms), en capture comme en sortie ; en exclusif, période matérielle minimale. Décochez si "

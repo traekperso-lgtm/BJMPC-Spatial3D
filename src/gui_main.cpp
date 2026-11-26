@@ -191,8 +191,8 @@ void stopLive() {
     if (g_liveStart.valid()) { g_liveStartError = g_liveStart.get(); }
     // la marge apprise devient le point de départ (moins de pops au prochain démarrage)
     const auto st = g_live.status();
-    if (st.running && (int)st.marginMs > g_m.settings.marginMs) {
-        g_m.settings.marginMs = (int)st.marginMs;
+    if (st.running && (int)st.marginMs > g_m.settings.marginMs && g_m.settings.marginMs < 30) {
+        g_m.settings.marginMs = std::min(30, (int)st.marginMs);   // marge apprise, plafonnée
         saveSettings(g_m.settings);
     }
     g_live.stop();
@@ -438,6 +438,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
     ImGui_ImplDX11_Init(g_dev, g_ctx);
 
     g_m.settings = loadSettings();
+    // interface simplifiée : le volume se règle dans Windows (synchronisé avec la carte), pas de gain caché
+    g_m.settings.gainDb = 0; g_m.settings.followCableVolume = true;
+    g_m.settings.marginMs = std::min(g_m.settings.marginMs, 30);
     g_m.sofaSupported = sofaSupported();
     refreshDevices();
     if (!tray) { ShowWindow(g_hwnd, nShow); UpdateWindow(g_hwnd); }

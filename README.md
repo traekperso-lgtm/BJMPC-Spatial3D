@@ -1,6 +1,6 @@
 # Spatial3D — spatialisation 3D pour Windows
 
-**BJMPC Informatique** · v0.6.0 · C++17
+**BJMPC Informatique** · v0.6.1 · C++17
 
 Spatial3D regarde comment le PC est équipé (casque, stéréo, 5.1, 7.1, 7.1.4…) et place chaque son de
 Windows au meilleur endroit possible sur **ce** matériel, en temps réel. Le moteur est conçu pour être
@@ -24,9 +24,13 @@ Lancez **Spatial3D** (Bureau ou menu Démarrer). Deux onglets :
   En dessous, les VU-mètres d'entrée et de sortie.
   L'état indique la **latence estimée de bout en bout**, la marge, la dérive d'horloge, la fréquence
   reçue, les coupures et les modes WASAPI obtenus (capture et sortie).
-- **Réglages** : sortie, disposition (automatique, casque, 5.1…), étalement, pièce virtuelle,
-  HRTF `.sofa`, marge du temps réel, latence minimale, sortie exclusive, démarrage avec Windows,
-  son 3D activé au lancement, fermeture dans la zone de notification.
+  La sortie audio et la disposition (automatique, casque, 5.1…) se choisissent ici.
+- **Réglages** : l'essentiel seulement — WASAPI (latence minimale, sortie exclusive, bascule de
+  la sortie Windows) et démarrage (avec Windows, son 3D au lancement, zone de notification).
+  Le reste est réglé pour la fidélité, sans curseur : image nette (aucun étalement), pièce virtuelle
+  automatique au casque seulement, marge apprise toute seule, volume réglé dans Windows et
+  synchronisé avec la carte. En ligne de commande, `--etalement`, `--piece` et `--sofa` restent
+  disponibles.
 
 Pour lire un film ou une musique, utilisez votre lecteur habituel (par exemple BJMPC Player) :
 Spatial3D spatialise tout ce que joue Windows.

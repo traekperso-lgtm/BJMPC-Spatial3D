@@ -207,8 +207,9 @@ static Scene makeScene(const std::vector<VirtualSource>& src, int inCh, const La
 
 static RenderOptions optionsFor(const Settings& s, const Layout& out) {
     RenderOptions o;
-    o.spreadDeg = std::clamp(s.spreadDeg, 0.0, 90.0);
-    o.room = s.room >= 0 ? std::min(s.room, 1.0) : (out.headphones ? 0.15 : 0.0);
+    // Réglages figés pour la fidélité : image nette (pas d'étalement), pièce virtuelle seulement au casque
+    o.spreadDeg = 0;
+    o.room = out.headphones ? 0.15 : 0.0;
     o.sofaPath = s.sofaPath;
     return o;
 }
