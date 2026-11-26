@@ -31,7 +31,7 @@
 
 using namespace s3d;
 
-static const char* kVersion = "0.6.1";
+static const char* kVersion = "0.7.0";
 static std::atomic<bool> gStop{ false };
 
 #ifdef _WIN32

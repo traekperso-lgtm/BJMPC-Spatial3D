@@ -89,4 +89,17 @@ std::vector<VirtualSource> sourcesFromAmbisonics(int inCh, int order) {
     return v;
 }
 
+void applyVirtualSpeakerOverrides(std::vector<VirtualSource>& src, const std::vector<int>& ids, const std::string& spec) {
+    if (spec.empty() || ids.size() != src.size()) return;
+    const auto o = parseSpeakerOverrides(spec);
+    auto it = o.find(kVirtualSpeakersKey);
+    if (it == o.end()) return;
+    for (size_t k = 0; k < src.size(); ++k) {
+        auto f = it->second.find(ids[k]);
+        if (f == it->second.end() || src[k].lfe) continue;
+        src[k].az = f->second.az;
+        src[k].dist = f->second.dist;
+    }
+}
+
 } // namespace s3d

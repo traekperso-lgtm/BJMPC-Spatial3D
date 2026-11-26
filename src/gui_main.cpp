@@ -214,6 +214,7 @@ std::wstring fileDialog(const wchar_t* filter, const wchar_t* title) {
 void applyActions(const UiActions& a) {
     if (a.gainChanged) g_live.setGainDb(g_m.settings.gainDb);
     if (a.speakersMoved && g_live.running() && g_live.moveSpeakers(g_m.liveScene.out)) g_m.liveScene = g_live.scene();
+    if (a.virtualMoved && g_live.running() && g_live.moveVirtualSpeakers(g_m.liveScene.sources)) g_m.liveScene = g_live.scene();
     if (a.settingsChanged) { saveSettings(g_m.settings); refreshDevices(); }
     if (a.startWithWindowsChanged) setStartWithWindows(g_m.settings.startWithWindows, L"--tray");
     if (a.toggleLive) {
@@ -308,7 +309,7 @@ LRESULT WINAPI wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GETMINMAXINFO: {
         auto* mm = (MINMAXINFO*)lp;
-        mm->ptMinTrackSize.x = (LONG)(980 * g_scale); mm->ptMinTrackSize.y = (LONG)(680 * g_scale);
+        mm->ptMinTrackSize.x = (LONG)(820 * g_scale); mm->ptMinTrackSize.y = (LONG)(560 * g_scale);
         return 0;
     }
     case WM_DPICHANGED: {
@@ -397,6 +398,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
         }
         return 0;
     }
+    prepareProcessForAudio();
 
     using SetCtx = BOOL(WINAPI*)(HANDLE);
     if (auto f = (SetCtx)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"))
@@ -417,7 +419,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int nShow) {
 
     g_scale = dpiScaleFor(nullptr);
     g_hwnd = CreateWindowExW(0, kClass, L"Spatial3D", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                             (int)(1240 * g_scale), (int)(800 * g_scale), nullptr, nullptr, inst, nullptr);
+                             (int)(1120 * g_scale), (int)(720 * g_scale), nullptr, nullptr, inst, nullptr);
     g_scale = dpiScaleFor(g_hwnd);
     BOOL dark = TRUE;
     DwmSetWindowAttribute(g_hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof dark);

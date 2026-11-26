@@ -1,6 +1,6 @@
 # Spatial3D — spatialisation 3D pour Windows
 
-**BJMPC Informatique** · v0.6.1 · C++17
+**BJMPC Informatique** · v0.7.0 · C++17
 
 Spatial3D regarde comment le PC est équipé (casque, stéréo, 5.1, 7.1, 7.1.4…) et place chaque son de
 Windows au meilleur endroit possible sur **ce** matériel, en temps réel. Le moteur est conçu pour être
@@ -10,27 +10,25 @@ et périodes WASAPI minimales.
 
 ## L'application
 
-Lancez **Spatial3D** (Bureau ou menu Démarrer). Deux onglets :
+Lancez **Spatial3D** (Bureau ou menu Démarrer). **Une seule fenêtre**, sans onglets :
 
-- **Temps réel** : un bouton « Activer le son 3D » spatialise tout le son de Windows (jeux, films,
-  navigateur, musique) via VB-Cable. À droite, la **vue de la scène** vue de dessus : les sources
-  (points orange) et les enceintes (carrés ; violet = hauteur) s'allument avec le son, les traits
-  montrent quelle source alimente quelle enceinte. La vue est à l'échelle (anneaux de 1 à 4 m).
-  **Glissez une enceinte** pour la placer comme dans votre pièce, en **angle et en distance** : le
-  placement est recalculé en direct (fondu enchaîné, sans clic) et mémorisé par disposition ; les
-  distances différentes sont **compensées comme sur un ampli home-cinéma** (les enceintes plus proches
-  sont retardées et baissées pour que tout arrive ensemble et au même niveau à votre place).
-  Double-clic ou « Positions d'origine » pour revenir aux angles ITU à 2,5 m.
-  En dessous, les VU-mètres d'entrée et de sortie.
-  L'état indique la **latence estimée de bout en bout**, la marge, la dérive d'horloge, la fréquence
-  reçue, les coupures et les modes WASAPI obtenus (capture et sortie).
-  La sortie audio et la disposition (automatique, casque, 5.1…) se choisissent ici.
-- **Réglages** : l'essentiel seulement — WASAPI (latence minimale, sortie exclusive, bascule de
-  la sortie Windows) et démarrage (avec Windows, son 3D au lancement, zone de notification).
-  Le reste est réglé pour la fidélité, sans curseur : image nette (aucun étalement), pièce virtuelle
-  automatique au casque seulement, marge apprise toute seule, volume réglé dans Windows et
-  synchronisé avec la carte. Pour le rendu de fichiers WAV en ligne de commande,
-  `--etalement`, `--piece` et `--sofa` restent disponibles.
+- **À gauche** : le bouton « Activer le son 3D » (tout le son de Windows passe par Spatial3D via
+  VB-Cable), la sortie audio et la disposition (automatique, casque, 5.1…), un état condensé
+  (latence, volume, coupures, mode WASAPI — le détail dans les infobulles) et des **Options**
+  repliées : WASAPI (latence minimale, sortie exclusive, bascule de la sortie Windows), démarrage.
+- **À droite** : la **scène** vue de dessus, à l'échelle (anneaux de 1 à 4 m), avec les VU-mètres.
+  - **Enceintes** : glissez-en une en **angle et en distance** pour la placer comme dans votre
+    pièce ; les distances sont **compensées comme sur un ampli home-cinéma** (retard + niveau).
+  - **Casque** : glissez les **haut-parleurs virtuels** (AVG, C, AVD, côtés, arrières) autour de
+    vous, en angle et en distance : plus loin = plus faible et plus de pièce, plus près = plus
+    présent. Le moteur binaural est reconstruit et échangé en direct, amorcé sur les dernières
+    millisecondes de son et en fondu enchaîné : aucun trou, aucun clic.
+  - Positions mémorisées ; double-clic ou « Positions d'origine » pour revenir aux angles ITU à 2,5 m.
+
+Tout le reste est réglé pour la fidélité, sans curseur : image nette (aucun étalement), pièce
+virtuelle automatique au casque seulement, marge apprise toute seule, volume réglé dans Windows et
+synchronisé avec la carte. Pour le rendu de fichiers WAV en ligne de commande, `--etalement`,
+`--piece` et `--sofa` restent disponibles.
 
 Pour lire un film ou une musique, utilisez votre lecteur habituel (par exemple BJMPC Player) :
 Spatial3D spatialise tout ce que joue Windows.
@@ -57,7 +55,11 @@ La ligne de commande reste disponible : `spatial3d-cli` (voir plus bas).
      zénith sans plafonnier). En stéréo, l'arrière est replié vers l'avant comme un downmix classique.
    - **Casque** → **binaural mesuré**. Chaque source virtuelle reçoit la réponse d'une vraie tête :
      l'**HRTF KEMAR** (MIT Media Lab, 710 directions) est **intégrée au programme**, égalisée en champ
-     diffus (le timbre reste neutre, seule la direction change). Un fichier `.sofa` d'une autre tête
+     diffus (le timbre reste neutre, seule la direction change). Entre deux directions mesurées, les trois réponses
+     voisines sont alignées puis mélangées (écart de temps entre oreilles continu) : un haut-parleur
+     virtuel tombe exactement à l'angle voulu. Entre deux directions mesurées, les trois
+     réponses voisines sont alignées puis mélangées (écart de temps entre oreilles continu, à
+     l'échantillon près) : un haut-parleur virtuel tombe exactement à l'angle voulu. Un fichier `.sofa` d'une autre tête
      peut la remplacer (version compilée avec libmysofa). À chaque haut-parleur virtuel s'ajoutent les
      **réflexions précoces d'un salon** (murs, sol, plafond, méthode des sources images, chacune avec
      sa propre direction HRTF), puis une réverbération FDN discrète : le son sort de la tête au lieu
@@ -107,8 +109,12 @@ horloge. Ce que fait Spatial3D pour éviter les pops :
   moyenne) ; correction plafonnée à ±0,2 % (inaudible). Le rééchantillonneur est un **sinc fenêtré
   Kaiser polyphase** (48 points) : réponse plate à ±0,001 dB jusqu'à 18 kHz et rapport signal/bruit
   de 93 à 98 dB, là où l'ancienne interpolation cubique tombait à 29 dB à 10 kHz (−2,3 dB à 18 kHz) ;
-- **marge auto-ajustée** : départ à 6 ms, chaque coupure l'augmente, et la marge apprise est
-  **mémorisée** pour le lancement suivant ;
+- **marge auto-ajustée dans les deux sens** : chaque coupure ajoute 3 ms ; sans coupure, la marge
+  redescend seule de 1 ms par minute jusqu'à 5 ms (sans repasser sous le niveau d'une coupure des
+  10 dernières minutes) : la latence se resserre d'elle-même tant que tout est stable ;
+- **processus protégé** : priorité « au-dessus de la normale » et exclusion de l'économie d'énergie
+  de Windows 11 (EcoQoS), qui bride les applications réduites ou en arrière-plan et provoque des
+  craquements ;
 - **fondus de 2 ms** à chaque discontinuité : si le tampon se vide, le son s'éteint en douceur puis
   revient en fondu ; s'il déborde (après une pause ou une sortie de veille), fondu enchaîné ;
 - **volume synchronisé avec la vraie carte** : VB-Cable ignore le curseur de volume et le bouton
@@ -237,7 +243,7 @@ Sous Linux (développement du moteur, rendu `--wav` uniquement) :
 | `src/wasapi_output.*` | Périphériques Windows, lecture et capture WASAPI (IAudioClient3 faible latence, exclusif), réglage 7.1 et sortie par défaut (IPolicyConfig) |
 | `src/live.*` | Mode temps réel : VB-Cable → moteur → vraie sortie, restauration à la fermeture |
 | `src/live_core.*` | Anneau SPSC, rééchantillonneur sinc polyphase, régulateur de dérive d'horloge (portable, testé) |
-| `tests/test_core.cpp` | 61 vérifications (HRTF, distances, fidélité du rééchantillonneur, positions d’enceintes, identités, downmix, hauteurs, Ambisonique, ITD/ILD, dérive, limiteur, absence de clics, anneau, convolution, WAV) |
+| `tests/test_core.cpp` | 64 vérifications (HRTF interpolée, marge qui se resserre, distance au casque, HRTF, distances, fidélité du rééchantillonneur, positions d’enceintes, identités, downmix, hauteurs, Ambisonique, ITD/ILD, dérive, limiteur, absence de clics, anneau, convolution, WAV) |
 
 ## Limites connues
 

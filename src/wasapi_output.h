@@ -85,6 +85,10 @@ private:
     Impl* d_;
 };
 
+// Stabilité : priorité « au-dessus de la normale » et exclusion de l'économie d'énergie de Windows 11
+// (EcoQoS bride les processus en arrière-plan ou réduits : source classique de craquements).
+void prepareProcessForAudio();
+
 // Réglages système (API IPolicyConfig, utilisée par le Panneau de configuration Son)
 bool setDefaultEndpoint(const std::wstring& id, std::string& err);
 bool setEndpoint71(const std::wstring& id, bool capture, int rate, std::string& err);

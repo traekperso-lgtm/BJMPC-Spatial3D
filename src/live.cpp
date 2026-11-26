@@ -44,6 +44,7 @@ int restoreOutput() {
 
 int runLive(const LiveArgs& a, std::atomic<bool>& stop) {
     std::string err;
+    prepareProcessForAudio();
     Settings s = loadSettings();
     if (!a.outputName.empty()) {
         std::vector<Endpoint> outs;

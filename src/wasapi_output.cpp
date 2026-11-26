@@ -689,4 +689,16 @@ void EndpointVolumeWatch::stop() {
     d_->muted = false; d_->db = 0.f; d_->pct = 100.f; d_->exclusive = false; d_->hwVolume = true;
 }
 
+void prepareProcessForAudio() {
+    SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    struct PowerThrottling { ULONG Version, ControlMask, StateMask; };
+    using SetInfo = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+    HMODULE k = GetModuleHandleW(L"kernel32.dll");
+    auto fn = k ? (SetInfo)(void*)GetProcAddress(k, "SetProcessInformation") : nullptr;
+    if (!fn) return;                                       // Windows 7 / 8 : rien à faire
+    // ControlMask : vitesse d'exécution (0x1) + résolution des minuteries (0x4) ; StateMask 0 = jamais bridé
+    PowerThrottling pt{ 1, 0x1 | 0x4, 0 };
+    fn(GetCurrentProcess(), 4 /*ProcessPowerThrottling*/, &pt, sizeof pt);
+}
+
 } // namespace s3d

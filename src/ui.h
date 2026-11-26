@@ -20,7 +20,7 @@ struct UiModel {
     int outputSel = -1;          // index dans outputs (sortie réellement utilisée)
     bool vbCableInstalled = true;
     bool sofaSupported = false;
-    std::string version = "0.6.1";
+    std::string version = "0.7.0";
 
     // Temps réel
     bool liveRunning = false, liveIdle = true, liveStarting = false;
@@ -41,6 +41,7 @@ struct UiModel {
 struct UiActions {
     bool toggleLive = false;
     bool speakersMoved = false;      // enceintes déplacées à la souris (à appliquer en direct)
+    bool virtualMoved = false;       // casque : haut-parleurs virtuels déplacés
     bool browseSofa = false;
     bool settingsChanged = false;    // à sauvegarder
     bool needRestart = false;        // réglage qui exige de relancer le moteur

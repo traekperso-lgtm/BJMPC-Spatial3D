@@ -61,6 +61,8 @@ public:
     // Déplace les enceintes en direct (même disposition, nouveaux azimuts) : nouvelle matrice
     // calculée ici, échangée par le fil audio avec un fondu enchaîné. Sans effet au casque.
     bool moveSpeakers(const Layout& out);
+    // Casque : nouveaux azimuts / distances des haut-parleurs virtuels (même nombre de sources)
+    bool moveVirtualSpeakers(const std::vector<VirtualSource>& src);
     void setGainDb(double db) { gain_ = (float)std::pow(10.0, db / 20.0); }
     Meters meters;
 private:

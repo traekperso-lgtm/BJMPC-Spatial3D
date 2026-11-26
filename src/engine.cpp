@@ -1,5 +1,6 @@
 #include "engine.h"
 #include "dsp.h"
+#include <cstring>
 #include "live_core.h"
 #include "renderer.h"
 
@@ -230,6 +231,10 @@ struct LiveEngine::Impl {
     int outRate = 48000;
     std::vector<float> xfade;               // rendu du nouveau moteur pendant le fondu
     DistanceAligner align;                  // distances réelles des enceintes (retard + niveau)
+    // historique de l'entrée du rendu : amorce le nouveau moteur avant l'échange (filtres HRTF pleins)
+    static constexpr size_t kHist = 2048;
+    std::vector<float> hist, primeIn, primeOut;
+    size_t histW = 0;
     EndpointVolumeWatch vol;                // volume / sourdine Windows de CABLE Input
     bool followVol = false;
     ~Impl() { delete pending.exchange(nullptr); delete retired.exchange(nullptr); }
@@ -322,6 +327,7 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     }
     auto sources = sourcesFromChannels(ids);
     const Layout outL = layoutFor(s, d.outEp);
+    if (outL.headphones) applyVirtualSpeakerOverrides(sources, ids, s.speakerPos);
     const RenderOptions opt = optionsFor(s, outL);
     const int outRate = d.outEp.mixRate;
     d.renderer = makeRenderer(sources, d.capCh, outL, outRate, opt, err);
@@ -337,6 +343,8 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
     d.incoming.assign((size_t)d.capRate * d.capCh, 0.f);
     d.inBuf.assign((size_t)16384 * d.capCh, 0.f);
     d.xfade.assign((size_t)16384 * d.renderer->outChannels(), 0.f);
+    d.hist.assign(Impl::kHist * d.capCh, 0.f); d.primeIn.assign(Impl::kHist * d.capCh, 0.f);
+    d.primeOut.assign(Impl::kHist * d.renderer->outChannels(), 0.f); d.histW = 0;
     d.align.init(d.renderer->outChannels(), outRate, 0.02);
     { auto al = computeDistanceAlignment(outL); d.align.setTargets(al.delaySec, al.gain); }
     if (s.followCableVolume) {
@@ -380,6 +388,13 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
                 frames * outCh <= d.xfade.size()) {
                 Renderer* nr = d.pending.exchange(nullptr);
                 if (nr) {
+                    // amorce : le nouveau moteur rejoue les ~43 dernières ms d'entrée (sortie ignorée)
+                    const size_t H = Impl::kHist, ch = (size_t)d.capCh;
+                    for (size_t f = 0; f < H; ++f) {
+                        const size_t src = (d.histW + f) % H;
+                        for (size_t c = 0; c < ch; ++c) d.primeIn[f * ch + c] = d.hist[src * ch + c];
+                    }
+                    nr->process(d.primeIn.data(), d.primeOut.data(), H);
                     nr->process(d.inBuf.data(), d.xfade.data(), frames);
                     const float inv = 1.f / (float)frames;
                     for (size_t f = 0; f < frames; ++f) {
@@ -392,6 +407,10 @@ bool LiveEngine::start(const Settings& s, std::string& err) {
                     d.retired.store(d.renderer.release(), std::memory_order_release);
                     d.renderer.reset(nr);
                 }
+            }
+            for (size_t f = 0; f < frames; ++f) {           // historique de l'entrée du rendu
+                std::memcpy(&d.hist[d.histW * d.capCh], &d.inBuf[f * d.capCh], sizeof(float) * d.capCh);
+                d.histW = (d.histW + 1) % Impl::kHist;
             }
             d.align.process(dst, frames);
             // gain général x volume Windows de CABLE Input (rampe sur le bloc : ni clic ni zip)
@@ -505,6 +524,23 @@ bool LiveEngine::moveSpeakers(const Layout& out) {
     sc.inIds = d.scene.inIds; sc.inputName = d.scene.inputName; sc.outputName = d.scene.outputName;
     sc.plan = d.scene.plan;
     d.scene = std::move(sc);
+    return true;
+}
+
+bool LiveEngine::moveVirtualSpeakers(const std::vector<VirtualSource>& src) {
+    if (!d_ || !running_) return false;
+    auto& d = *d_;
+    if (!d.scene.out.headphones || src.size() != d.sources.size()) return false;
+    std::vector<VirtualSource> ns = d.sources;
+    for (size_t k = 0; k < ns.size(); ++k) { ns[k].az = src[k].az; ns[k].dist = src[k].dist; }
+    delete d.retired.exchange(nullptr);
+    std::string err;
+    auto r = makeRenderer(ns, d.capCh, d.scene.out, d.outRate, d.opt, err);
+    if (!r || r->outChannels() != d.scene.outChannels) return false;
+    d.sources = ns;
+    delete d.pending.exchange(r.release());
+    std::lock_guard<std::mutex> lk(d.m);
+    d.scene.sources = ns;
     return true;
 }
 

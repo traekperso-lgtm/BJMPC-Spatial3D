@@ -52,6 +52,8 @@ std::vector<std::string> knownLayoutNames();
 // Texte « 5.1|0:35@2.10,1:-35;7.1|9:100 » : par disposition, identifiant de canal -> azimut en degrés
 // et, après @, distance en mètres (absente = distance par défaut).
 struct SpeakerPos { double az = 0, dist = kDefaultSpeakerDist; };
+// Au casque, les haut-parleurs virtuels (un par canal reçu) sont rangés sous cette clé
+constexpr const char* kVirtualSpeakersKey = "casque";
 using SpeakerOverrides = std::map<std::string, std::map<int, SpeakerPos>>;
 SpeakerOverrides parseSpeakerOverrides(const std::string& spec);
 std::string formatSpeakerOverrides(const SpeakerOverrides& o);

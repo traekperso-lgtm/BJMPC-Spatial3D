@@ -129,16 +129,26 @@ void DriftController::init(double inRate, double outRate, double marginMs, doubl
     inRate_ = inRate; outRate_ = outRate; nominal_ = inRate / outRate;
     margin_ = marginMs * 1e-3 * inRate; maxMargin_ = maxMarginMs * 1e-3 * inRate;
     winLow_ = 1e18; winTime_ = 0; lastLow_ = margin_; integ_ = 0; adj_ = 0;
+    minMargin_ = std::min(margin_, 0.005 * inRate);   // plancher : 5 ms (ou moins si demandé)
+    quiet_ = 0; sinceUnderrun_ = 1e9; badMargin_ = 0;
 }
 
 void DriftController::onUnderrun() {
-    margin_ = std::min(maxMargin_, margin_ + 0.010 * inRate_);
-    winLow_ = 1e18; winTime_ = 0;
+    badMargin_ = std::max(badMargin_, margin_);          // ce niveau-là ne suffisait pas
+    margin_ = std::min(maxMargin_, margin_ + 0.003 * inRate_);
+    winLow_ = 1e18; winTime_ = 0; quiet_ = 0; sinceUnderrun_ = 0;
 }
 
 double DriftController::update(double residual, size_t outFrames) {
     winLow_ = std::min(winLow_, residual);
     winTime_ += outFrames / outRate_;
+    quiet_ += outFrames / outRate_; sinceUnderrun_ += outFrames / outRate_;
+    if (sinceUnderrun_ > 600) badMargin_ = 0;            // 10 min sans coupure : on oublie
+    if (quiet_ >= 60 && margin_ > minMargin_) {          // 1 min sans coupure : 1 ms de moins
+        const double next = std::max(minMargin_, margin_ - 0.001 * inRate_);
+        if (next > badMargin_ + 0.5e-3 * inRate_) margin_ = next;
+        quiet_ = 0;
+    }
     if (winTime_ >= 0.5) {                       // une décision par demi-seconde
         lastLow_ = winLow_;
         const double err = (winLow_ - margin_) / inRate_;            // secondes d'avance

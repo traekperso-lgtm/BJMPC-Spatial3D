@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(Spatial3D VERSION 0.6.1 LANGUAGES CXX)
+project(Spatial3D VERSION 0.7.0 LANGUAGES CXX)
 if(WIN32)
   enable_language(RC)
 endif()

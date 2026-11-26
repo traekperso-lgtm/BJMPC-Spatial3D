@@ -460,6 +460,61 @@ static void testResamplerFidelity() {
     CHECK(std::fabs(g1) < 0.01 && std::fabs(g10) < 0.05 && std::fabs(g18) < 0.2, "Reechantillonneur : bande passante plate jusqu'a 18 kHz");
 }
 
+// HRTF interpolée : l'écart de temps entre oreilles varie sans à-coup d'un degré à l'autre
+static void testHrtfInterpolation() {
+    auto onset = [](const std::vector<float>& x) {
+        float pk = 0; for (float v : x) pk = std::max(pk, std::fabs(v));
+        for (size_t i = 0; i < x.size(); ++i) if (std::fabs(x[i]) >= 0.1f * pk) return (int)i;
+        return 0;
+    };
+    std::vector<float> L, R;
+    int prev = 0, maxJump = 0;
+    bool mono = true;
+    for (int az = 0; az <= 90; ++az) {
+        builtinHrir(az, 0, 48000, L, R);
+        const int itd = onset(R) - onset(L);
+        if (az > 0) { maxJump = std::max(maxJump, std::abs(itd - prev)); if (itd < prev - 1) mono = false; }
+        prev = itd;
+    }
+    builtinHrir(0, 45, 48000, L, R);                        // entre les anneaux 40° et 50° mesurés
+    double e = 0; for (float v : L) e += v * v;
+    printf("  HRTF interpolee : ITD de 0 a %d ech. sur 0-90 deg, saut max %d ech.\n", prev, maxJump);
+    CHECK(mono && maxJump <= 2 && e > 0.01, "HRTF interpolee : ITD continue, hauteur 45 deg reconstruite");
+}
+
+// Marge : resserrement automatique sans coupure, +3 ms par coupure
+static void testMarginTightening() {
+    DriftController dc; dc.init(48000, 48000, 20);
+    for (int k = 0; k < 100 * 300; ++k) dc.update(dc.marginFrames() + 200, 480);   // 5 min stables
+    const double after = dc.marginMs();
+    dc.onUnderrun();
+    const double bumped = dc.marginMs();
+    for (int k = 0; k < 100 * 300; ++k) dc.update(dc.marginFrames() + 200, 480);
+    printf("  marge : 20 ms -> %.0f ms apres 5 min stables ; coupure -> %.0f ms ; 5 min plus tard %.0f ms\n", after, bumped, dc.marginMs());
+    CHECK(after <= 16 && after >= 5 && std::fabs(bumped - after - 3) < 0.01 && dc.marginMs() > after,
+          "Marge : se resserre seule et ne retombe pas sous le niveau d'une coupure recente");
+}
+
+// Casque : un haut-parleur virtuel rapproché sonne plus fort, plus loin plus faible
+static void testVirtualDistance() {
+    auto level = [](double dist) {
+        auto src = sourcesFromChannels({ CH_FL });
+        src[0].dist = dist;
+        Layout hp; layoutFromName("casque", hp);
+        RenderOptions o; o.room = 0.15; std::string e;
+        auto r = makeRenderer(src, 1, hp, 48000, o, e);
+        std::vector<float> x(48000, 0.f), y(96000);
+        uint32_t seed = 12345;                               // bruit blanc reproductible
+        for (auto& v : x) { seed = seed * 1664525u + 1013904223u; v = 0.3f * ((seed >> 8) / 8388608.f - 1.f); }
+        r->process(x.data(), y.data(), 48000);
+        double p = 0; for (size_t n = 24000; n < 96000; ++n) p += y[n] * y[n];
+        return 10 * std::log10(p);
+    };
+    const double near = level(1.25), mid = level(2.5), far = level(5.0);
+    printf("  casque, distance virtuelle : 1,25 m %+.1f dB, 5 m %+.1f dB (par rapport a 2,5 m)\n", near - mid, far - mid);
+    CHECK(near - mid > 3 && far - mid < -3, "Casque : la distance d'un haut-parleur virtuel change son niveau");
+}
+
 int main() {
     testIdentity();
     testDownmix51to20();
@@ -475,6 +530,9 @@ int main() {
     testBuiltinHrtf();
     testDistanceAligner();
     testResamplerFidelity();
+    testHrtfInterpolation();
+    testMarginTightening();
+    testVirtualDistance();
     testConvolver();
     testWavRoundTrip();
     printf("%d/%d verifications reussies\n", checks - fails, checks);

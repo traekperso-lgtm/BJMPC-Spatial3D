@@ -77,11 +77,6 @@ static void smooth(float* dst, const float* src, int n) {
     for (int i = 0; i < n; ++i) dst[i] = std::max(src[i], dst[i] * k);
 }
 
-static void sectionTitle(const char* t) {
-    ImGui::PushFont(font(F_HEAD));
-    ImGui::TextUnformatted(t);
-    ImGui::PopFont();
-}
 
 static bool beginCard(const char* id) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanel);
@@ -122,12 +117,12 @@ static ImVec2 speakerPos(ImVec2 c, float R, const Speaker& sp) {
     return scenePos(c, R * (float)sp.dist / kSceneMeters, sp.az, sp.el);
 }
 
-struct SceneEdit { bool moved = false, commit = false; };
+struct SceneEdit { bool moved = false, commit = false, srcMoved = false; };
 
 // L : disposition affichée, modifiable à la souris (glisser une enceinte = nouvel azimut et distance)
-static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const float* outLv, float height, float s) {
+static SceneEdit drawScene(Scene* sc, Layout& L, const float* inLv, const float* outLv, float height, float s) {
     SceneEdit ed;
-    static int s_drag = -1;
+    static int s_drag = -1, s_dragSrc = -1;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const float w = ImGui::GetContentRegionAvail().x;
@@ -140,8 +135,7 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
     // anneaux de distance : 1, 2, 3 et 4 m
     for (int k = 4; k >= 1; --k) dl->AddCircleFilled(c, R * (0.25f * k + 0.08f), u32(kAccent, 0.012f * k), 96);
     dl->AddCircle(c, R, u32(kBorder), 128, 1.5f * s);
-    if (!L.headphones)
-        for (int k = 1; k <= 3; ++k) dl->AddCircle(c, R * k / kSceneMeters, u32(kBorder, 0.45f), 96, 1.f * s);
+    for (int k = 1; k <= 3; ++k) dl->AddCircle(c, R * k / kSceneMeters, u32(kBorder, 0.45f), 96, 1.f * s);
     dl->AddLine(ImVec2(c.x - R * 1.08f, c.y), ImVec2(c.x + R * 1.08f, c.y), u32(kBorder, 0.5f), 1.f);
     dl->AddLine(ImVec2(c.x, c.y - R * 1.08f), ImVec2(c.x, c.y + R * 1.08f), u32(kBorder, 0.5f), 1.f);
     ImGui::PushFont(font(F_SMALL));
@@ -149,8 +143,7 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
         const ImVec2 ts = ImGui::CalcTextSize(t);
         dl->AddText(ImVec2(at.x - ts.x * 0.5f, at.y - ts.y * 0.5f), col, t);
     };
-    if (!L.headphones)
-        for (int k = 1; k <= 4; ++k) {
+    for (int k = 1; k <= 4; ++k) {
             char mt[8]; snprintf(mt, sizeof mt, "%d m", k);
             dl->AddText(ImVec2(c.x + R * k / kSceneMeters * 0.7071f + 3 * s, c.y + R * k / kSceneMeters * 0.7071f), u32(kDim, 0.6f), mt);
         }
@@ -227,6 +220,43 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
                 if (!L.speakers[i].lfe) spk[i] = speakerPos(c, R, L.speakers[i]);
     }
 
+    // casque : les sources sont les haut-parleurs virtuels, déplaçables (angle et distance)
+    auto srcPos = [&](const VirtualSource& v) {
+        return L.headphones ? scenePos(c, R * (float)v.dist / kSceneMeters, v.az, v.el) : scenePos(c, R * 0.97f, v.az, v.el);
+    };
+    if (sc && L.headphones) {
+        const ImVec2 mp = ImGui::GetIO().MousePos;
+        int hov = -1;
+        for (size_t k = 0; k < sc->sources.size(); ++k) {
+            if (sc->sources[k].lfe) continue;
+            const ImVec2 p = srcPos(sc->sources[k]);
+            if (sceneHovered && std::fabs(mp.x - p.x) <= 11 * s && std::fabs(mp.y - p.y) <= 11 * s) hov = (int)k;
+        }
+        if (hov >= 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && hov < (int)sc->inIds.size()) {
+            const auto nom = sourcesFromChannels({ sc->inIds[hov] });
+            if (!nom.empty()) { sc->sources[hov].az = nom[0].az; sc->sources[hov].dist = kDefaultSpeakerDist; ed.srcMoved = ed.commit = true; }
+            s_dragSrc = -1;
+        } else if (hov >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            s_dragSrc = hov;
+        }
+        if (s_dragSrc >= (int)sc->sources.size()) s_dragSrc = -1;
+        if (s_dragSrc >= 0) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                const float dx = mp.x - c.x, dy = mp.y - c.y;
+                if (dx * dx + dy * dy > 1.f) {
+                    auto& v = sc->sources[s_dragSrc];
+                    double az = std::round(std::atan2(-dx, -dy) * 180.0 / kPi);
+                    if (az <= -180) az += 360;
+                    const double horiz = std::sqrt(dx * dx + dy * dy) / R * kSceneMeters;
+                    double dist = horiz / std::max(0.2, std::cos(v.el * kPi / 180.0));
+                    dist = std::clamp(std::round(dist * 20.0) / 20.0, kMinSpeakerDist, kMaxSpeakerDist);
+                    if (std::fabs(az - v.az) >= 1.0 || std::fabs(dist - v.dist) >= 0.049) { v.az = az; v.dist = dist; ed.srcMoved = true; }
+                }
+            } else { ed.commit = true; s_dragSrc = -1; }
+        }
+        if (hov >= 0 || s_dragSrc >= 0) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+
     // sources (et liaisons vers les enceintes)
     if (sc) {
         const bool ambi = !sc->sources.empty() && sc->sources[0].label.rfind("Ambi", 0) == 0;
@@ -235,7 +265,7 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
             if (src.lfe && L.headphones) continue;
             int col = 0; for (int i = 0; i < sc->inChannels; ++i) if (src.w[i] != 0.f) { col = i; break; }
             const float lv = inLv ? std::min(1.f, (ambi ? inLv[0] : inLv[std::min(col, 31)]) * 1.6f) : 0.f;
-            const ImVec2 sp = src.lfe ? ImVec2(lfePos.x - 34 * s, lfePos.y) : scenePos(c, R * (L.headphones ? 0.74f : 0.97f), src.az, src.el);
+            const ImVec2 sp = src.lfe ? ImVec2(lfePos.x - 34 * s, lfePos.y) : srcPos(src);
             if (!L.headphones && !sc->matrix.empty()) {
                 for (size_t o = 0; o < L.speakers.size(); ++o) {
                     float g = 0;
@@ -246,13 +276,23 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
             } else if (L.headphones && !src.lfe) {
                 dl->AddLine(sp, c, u32(kOrange, 0.06f + 0.4f * lv), 1.2f * s);
             }
-            const float rr = (ambi ? 5.f : 7.f) * s;
+            const float rr = (ambi ? 5.f : L.headphones ? 9.f : 7.f) * s;
+            if (L.headphones && (int)k == s_dragSrc) {
+                char dt[48]; snprintf(dt, sizeof dt, "%.0f°  %.2f m", src.az, src.dist);
+                centered(ImVec2(sp.x, sp.y - rr - 12 * s), u32(kOrange), dt);
+            }
+            if (L.headphones && !src.lfe && k < sc->inIds.size())
+                centered(ImVec2(sp.x, sp.y + rr + 9 * s), u32(kText, 0.75f), shortName(sc->inIds[k]));
             dl->AddCircleFilled(sp, rr + 6 * s * lv, u32(kOrange, 0.18f * lv), 24);
             dl->AddCircleFilled(sp, rr, u32(mix(v4(120, 80, 40), kOrange, 0.35f + 0.65f * lv)), 24);
             if (ImGui::IsMouseHoveringRect(sp - ImVec2(rr, rr), sp + ImVec2(rr, rr))) {
                 ImGui::BeginTooltip();
                 ImGui::Text("Source : %s", src.label.c_str());
-                if (!src.lfe) ImGui::Text("azimut %.0f°, élévation %.0f°", src.az, src.el);
+                if (!src.lfe) ImGui::Text("azimut %.0f°, élévation %.0f°%s", src.az, src.el, L.headphones ? "" : "");
+                if (L.headphones && !src.lfe) {
+                    ImGui::Text("distance %.2f m", src.dist);
+                    ImGui::TextDisabled("glisser : angle et distance · double-clic : position d'origine");
+                }
                 ImGui::Text("niveau %.1f dB", 20 * std::log10(std::max(1e-5f, inLv ? inLv[std::min(col, 31)] : 0.f)));
                 ImGui::EndTooltip();
             }
@@ -305,6 +345,23 @@ static SceneEdit drawScene(const Scene* sc, Layout& L, const float* inLv, const 
     dl->AddText(ImVec2(p0.x + 14 * s, p0.y + 10 * s), u32(kDim), title.c_str());
     ImGui::PopFont();
     return ed;
+}
+
+// Casque : mémorise les haut-parleurs virtuels déplacés (clé kVirtualSpeakersKey)
+static void storeVirtualPositions(Settings& st, const Scene& sc) {
+    auto o = parseSpeakerOverrides(st.speakerPos);
+    auto& m = o[kVirtualSpeakersKey];
+    m.clear();
+    for (size_t k = 0; k < sc.sources.size() && k < sc.inIds.size(); ++k) {
+        const auto& v = sc.sources[k];
+        if (v.lfe) continue;
+        const auto nom = sourcesFromChannels({ sc.inIds[k] });
+        if (nom.empty()) continue;
+        if (std::fabs(v.az - nom[0].az) >= 0.5 || std::fabs(v.dist - kDefaultSpeakerDist) >= 0.005)
+            m[sc.inIds[k]] = SpeakerPos{ v.az, v.dist };
+    }
+    if (m.empty()) o.erase(kVirtualSpeakersKey);
+    st.speakerPos = formatSpeakerOverrides(o);
 }
 
 // Mémorise dans les réglages les angles et distances qui diffèrent de la position d'origine
@@ -407,48 +464,69 @@ static void statusPill(const char* text, const ImVec4& col) {
 }
 
 // ---------------------------------------------------------------------------------------------
-//  Onglets
+//  Interface unique : commandes à gauche, scène à droite
 // ---------------------------------------------------------------------------------------------
-static void liveTab(UiModel& m, UiActions& a, float s) {
+static void optionsSection(UiModel& m, UiActions& a) {
+    ImGui::TextDisabled("WASAPI");
+    if (ImGui::Checkbox("Latence minimale", &m.settings.lowLatency)) a.settingsChanged = a.needRestart = true;
+    helpMarker("Windows 10/11 : le moteur audio tourne à la période minimale du pilote (souvent 2,7 ms au lieu "
+               "de 10 ms), en capture comme en sortie ; en exclusif, période matérielle minimale. Décochez si "
+               "un vieux pilote produit des craquements.");
+    if (ImGui::Checkbox("Sortie exclusive", &m.settings.exclusive)) a.settingsChanged = a.needRestart = true;
+    helpMarker("Spatial3D parle directement à la carte son, sans le mélangeur de Windows : latence plus faible "
+               "et moins de risques de pops. La carte est alors réservée à Spatial3D. Repli automatique en "
+               "mode partagé si la carte refuse.");
+    if (ImGui::Checkbox("Ne pas basculer la sortie Windows", &m.settings.keepDefault)) a.settingsChanged = a.needRestart = true;
+    helpMarker("Cochez si vous préférez choisir « CABLE Input » vous-même dans chaque application.");
+    ImGui::Spacing();
+    ImGui::TextDisabled("Démarrage");
+    if (ImGui::Checkbox("Avec Windows (zone de notification)", &m.settings.startWithWindows)) {
+        a.settingsChanged = true; a.startWithWindowsChanged = true;
+    }
+    if (ImGui::Checkbox("Son 3D activé au lancement", &m.settings.liveOnLaunch)) a.settingsChanged = true;
+    if (ImGui::Checkbox("Fermer = réduire dans la zone de notification", &m.settings.closeToTray)) a.settingsChanged = true;
+    ImGui::Spacing();
+    if (ImGui::Button("Rétablir le son normal", ImVec2(-FLT_MIN, 0))) a.restoreSound = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
+    ImGui::PushFont(font(F_SMALL));
+    ImGui::TextWrapped("Spatial3D %s — BJMPC Informatique. Dear ImGui (MIT), VB-Cable (VB-Audio), "
+                       "HRTF KEMAR (MIT Media Lab).", m.version.c_str());
+    ImGui::PopFont();
+    ImGui::PopStyleColor();
+}
+
+static void mainView(UiModel& m, UiActions& a, float s) {
     static float in[32], out[32];
     smooth(in, m.liveIn, 32); smooth(out, m.liveOut, 32);
-    const float leftW = 380 * s;
-    ImGui::BeginChild("##liveL", ImVec2(leftW, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    const float leftW = std::clamp(ImGui::GetContentRegionAvail().x * 0.27f, 290 * s, 360 * s);
+    ImGui::BeginChild("##left", ImVec2(leftW, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
 
-    beginCard("##livecmd");
-    sectionTitle("Son de Windows en 3D");
-    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-    ImGui::TextWrapped("Jeux, films, navigateur, musique : tout le son passe par Spatial3D via VB-Cable. "
-                       "Arrêter ou quitter rend le son normal.");
-    ImGui::PopStyleColor();
-    ImGui::Spacing();
+    // Marche / arrêt
     const bool on = m.liveRunning;
     ImGui::PushStyleColor(ImGuiCol_Button, on ? v4(127, 29, 29) : v4(13, 120, 110));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, on ? v4(153, 27, 27) : v4(17, 148, 136));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, on ? v4(185, 28, 28) : v4(20, 170, 156));
     ImGui::PushFont(font(F_HEAD));
     ImGui::BeginDisabled(!m.vbCableInstalled || m.liveStarting);
-    if (ImGui::Button(m.liveStarting ? "Démarrage…" : on ? "■  Arrêter" : "▶  Activer le son 3D", ImVec2(-FLT_MIN, 54 * s))) a.toggleLive = true;
+    if (ImGui::Button(m.liveStarting ? "Démarrage…" : on ? "■  Arrêter" : "▶  Activer le son 3D", ImVec2(-FLT_MIN, 46 * s))) a.toggleLive = true;
     ImGui::EndDisabled();
     ImGui::PopFont();
     ImGui::PopStyleColor(3);
     if (!m.vbCableInstalled) {
-        wrappedColored(kAmber, "VB-Cable n'est pas installé (ou l'ordinateur n'a pas redémarré depuis). "
-                               "Relancez build-windows.bat ou installez-le depuis le site de VB-Audio.");
+        wrappedColored(kAmber, "VB-Cable n'est pas installé (ou l'ordinateur n'a pas redémarré depuis).");
         if (ImGui::Button("Télécharger VB-Cable", ImVec2(-FLT_MIN, 0))) a.openVbCableSite = true;
     }
     if (!m.liveError.empty()) wrappedColored(kRed, m.liveError);
     if (!m.liveWarning.empty()) wrappedColored(kAmber, m.liveWarning);
-    endCard();
-
     ImGui::Spacing();
-    beginCard("##liveout");
+
+    beginCard("##out");
     outputCombos(m, a);
     endCard();
-
     ImGui::Spacing();
-    beginCard("##livestats");
-    sectionTitle("État");
+
+    // État condensé : le détail est dans les infobulles
+    beginCard("##state");
     if (ImGui::BeginTable("##st", 2, ImGuiTableFlags_SizingStretchProp)) {
         auto row = [](const char* k, const std::string& v, const ImVec4* col = nullptr) {
             ImGui::TableNextRow();
@@ -456,113 +534,92 @@ static void liveTab(UiModel& m, UiActions& a, float s) {
             ImGui::TableNextColumn();
             if (col) ImGui::TextColored(*col, "%s", v.c_str()); else ImGui::TextUnformatted(v.c_str());
         };
-        char b[160];
-        if (!m.liveRunning) row("Spatialisation", "arrêtée");
+        char b[200];
+        if (!m.liveRunning) row("Son 3D", "arrêté");
         else {
-            row("Signal", m.liveIdle ? "en attente de son" : "reçu", m.liveIdle ? &kDim : &kGreen);
             if (m.totalLatencyMs > 0) {
                 snprintf(b, sizeof b, "%.1f ms", m.totalLatencyMs);
-                row("Latence estimée", b, m.totalLatencyMs <= 25 ? &kGreen : nullptr);
+                row("Latence", b, m.totalLatencyMs <= 25 ? &kGreen : nullptr);
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Capture %.1f ms + marge %.0f ms + traitement %.1f ms + sortie %.1f ms",
-                                      m.capturePeriodMs, m.marginMs, m.processingMs, m.outputBufferMs);
-            }
+                    ImGui::SetTooltip("Capture %.1f ms + marge %.0f ms (point bas %.1f) + traitement %.1f ms + sortie %.1f ms\n"
+                                      "Dérive d'horloge %+.0f ppm, entrée %.0f Hz",
+                                      m.capturePeriodMs, m.marginMs, m.lowMs, m.processingMs, m.outputBufferMs, m.driftPpm, m.inHz);
+            } else row("Latence", "…");
             if (m.followVolume) {
-                if (m.windowsMuted) row("Volume Windows", "sourdine (son coupé)", &kAmber);
-                else {
-                    snprintf(b, sizeof b, "%.0f %% (%.1f dB) — %s", m.windowsVolumePct, m.windowsVolumeDb,
-                             m.volumeDigital ? "appliqué par Spatial3D" : "synchronisé avec la sortie");
-                    row("Volume Windows", b);
-                }
+                if (m.windowsMuted) row("Volume", "sourdine", &kAmber);
+                else { snprintf(b, sizeof b, "%.0f %%", m.windowsVolumePct); row("Volume", b); }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%.1f dB — %s", m.windowsVolumeDb,
+                                      m.volumeDigital ? "appliqué par Spatial3D (exclusif sans volume matériel)" : "synchronisé avec la carte son");
             }
-            snprintf(b, sizeof b, "%.0f ms (point bas %.1f)", m.marginMs, m.lowMs); row("Marge VB-Cable", b);
-            snprintf(b, sizeof b, "%+.0f ppm", m.driftPpm); row("Dérive d'horloge", b);
-            snprintf(b, sizeof b, "%.0f Hz", m.inHz); row("Entrée VB-Cable", m.inHz > 0 ? b : "—");
-            snprintf(b, sizeof b, "%d (fondues, sans clic)", m.underruns); row("Coupures", m.underruns ? b : "0", m.underruns > 3 ? &kAmber : nullptr);
-            snprintf(b, sizeof b, "%d", m.captureGlitches); row("Pertes VB-Cable", b, m.captureGlitches > 0 ? &kAmber : nullptr);
-            if (!m.liveCaptureMode.empty()) row("Capture WASAPI", m.liveCaptureMode);
-            if (!m.liveOutputMode.empty()) row("Sortie WASAPI", m.liveOutputMode);
+            const int bad = m.underruns + m.captureGlitches;
+            snprintf(b, sizeof b, "%d", bad);
+            row("Coupures", b, bad > 3 ? &kAmber : bad == 0 ? &kGreen : nullptr);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%d fondues côté sortie (sans clic), %d pertes côté VB-Cable", m.underruns, m.captureGlitches);
+            row("WASAPI", m.liveOutputMode.rfind("exclusif", 0) == 0 ? "exclusif" : m.liveOutputMode.find("IAudioClient3") != std::string::npos ? "partagé faible latence" : "partagé");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Capture : %s\nSortie : %s", m.liveCaptureMode.c_str(), m.liveOutputMode.c_str());
         }
         ImGui::EndTable();
     }
     endCard();
+    ImGui::Spacing();
+
+    beginCard("##opt");
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+    if (ImGui::CollapsingHeader("Options")) optionsSection(m, a);
+    ImGui::PopStyleColor();
+    endCard();
     ImGui::EndChild();
 
     ImGui::SameLine();
-    ImGui::BeginChild("##liveR", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
+    ImGui::BeginChild("##right", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
     const float hintH = ImGui::GetTextLineHeightWithSpacing() + 4 * s;
     const float sceneH = ImGui::GetContentRegionAvail().y - 118 * s - hintH - 2 * ImGui::GetStyle().ItemSpacing.y;
-    const Scene* sc = m.liveRunning ? &m.liveScene : nullptr;
+    Scene* sc = m.liveRunning ? &m.liveScene : nullptr;
     Layout& L = sc ? m.liveScene.out : m.previewLayout;
     SceneEdit ed = drawScene(sc, L, in, out, sceneH, s);
-    if (!L.headphones) {
-        const bool custom = parseSpeakerOverrides(m.settings.speakerPos).count(L.name) > 0;
+    {
+        const auto ov = parseSpeakerOverrides(m.settings.speakerPos);
+        const bool custom = ov.count(L.headphones ? std::string(kVirtualSpeakersKey) : L.name) > 0;
         ImGui::PushFont(font(F_SMALL));
-        ImGui::TextDisabled(m.liveRunning ? "Glissez une enceinte (angle et distance) pour la placer comme chez vous : le son suit en direct."
-                                          : "Glissez une enceinte (angle et distance) pour la placer comme chez vous.");
+        ImGui::TextDisabled(!L.headphones ? "Glissez une enceinte (angle et distance) pour la placer comme chez vous."
+                            : sc ? "Glissez un haut-parleur virtuel (angle et distance) pour placer le son autour de vous."
+                                 : "Activez le son 3D pour placer les haut-parleurs virtuels autour de vous.");
         if (custom) {
             ImGui::SameLine();
             if (ImGui::SmallButton("Positions d'origine")) {
-                for (auto& sp : L.speakers) {
-                    double az, el; bool lfe;
-                    if (!sp.lfe && channelPosition(sp.id, L.mask(), az, el, lfe)) { sp.az = az; sp.dist = kDefaultSpeakerDist; }
+                if (L.headphones) {
+                    if (sc) {
+                        for (size_t k = 0; k < sc->sources.size() && k < sc->inIds.size(); ++k) {
+                            const auto nom = sourcesFromChannels({ sc->inIds[k] });
+                            if (!nom.empty() && !sc->sources[k].lfe) { sc->sources[k].az = nom[0].az; sc->sources[k].dist = kDefaultSpeakerDist; }
+                        }
+                        ed.srcMoved = ed.commit = true;
+                    } else {
+                        auto o2 = ov; o2.erase(kVirtualSpeakersKey);
+                        m.settings.speakerPos = formatSpeakerOverrides(o2); a.settingsChanged = true;
+                    }
+                } else {
+                    for (auto& sp : L.speakers) {
+                        double az, el; bool lfe;
+                        if (!sp.lfe && channelPosition(sp.id, L.mask(), az, el, lfe)) { sp.az = az; sp.dist = kDefaultSpeakerDist; }
+                    }
+                    ed.moved = ed.commit = true;
                 }
-                ed.moved = ed.commit = true;
             }
         }
         ImGui::PopFont();
-    } else {
-        ImGui::Dummy(ImVec2(1, hintH - ImGui::GetStyle().ItemSpacing.y));
     }
     if (ed.moved) a.speakersMoved = true;
-    if (ed.commit) { storeSpeakerPositions(m.settings, L); a.settingsChanged = true; }
+    if (ed.srcMoved) a.virtualMoved = true;
+    if (ed.commit) {
+        if (L.headphones) { if (sc) storeVirtualPositions(m.settings, *sc); }
+        else storeSpeakerPositions(m.settings, L);
+        a.settingsChanged = true;
+    }
     drawMeters(L, sc ? sc->inChannels : 0, in, out, sc, s);
-    ImGui::EndChild();
-}
-
-static void settingsTab(UiModel& m, UiActions& a, float s) {
-    ImGui::BeginChild("##set", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-    const float avail = ImGui::GetContentRegionAvail().x;
-    const bool two = avail > 900 * s;
-    const float colW = two ? (avail - ImGui::GetStyle().ItemSpacing.x) * 0.5f : avail;
-    ImGui::BeginChild("##setcol", ImVec2(colW, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-
-    if (two) {
-        ImGui::EndChild();
-        ImGui::SameLine();
-        ImGui::BeginChild("##setcol2", ImVec2(colW, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-    }
-    beginCard("##s3");
-    sectionTitle("WASAPI");
-    if (ImGui::Checkbox("Latence minimale (périodes WASAPI les plus courtes)", &m.settings.lowLatency)) a.settingsChanged = a.needRestart = true;
-    helpMarker("Windows 10/11 : le moteur audio tourne à la période minimale du pilote (souvent 2,7 ms au lieu "
-               "de 10 ms), en capture comme en sortie ; en exclusif, période matérielle minimale. Décochez si "
-               "un vieux pilote produit des craquements.");
-    if (ImGui::Checkbox("Sortie WASAPI exclusive", &m.settings.exclusive)) a.settingsChanged = a.needRestart = true;
-    helpMarker("Spatial3D parle directement à la carte son, sans le mélangeur de Windows : latence plus faible "
-               "et moins de risques de pops. La carte est alors réservée à Spatial3D (les autres applications ne "
-               "peuvent plus l'utiliser en même temps). Repli automatique en mode partagé si la carte refuse.");
-    if (ImGui::Checkbox("Ne pas basculer la sortie de Windows sur VB-Cable", &m.settings.keepDefault)) a.settingsChanged = a.needRestart = true;
-    helpMarker("Cochez si vous préférez choisir « CABLE Input » vous-même dans chaque application.");
-    if (ImGui::Button("Rétablir le son normal (sortie par défaut)")) a.restoreSound = true;
-    endCard();
-    ImGui::Spacing();
-
-    beginCard("##s4");
-    sectionTitle("Application");
-    if (ImGui::Checkbox("Démarrer avec Windows (dans la zone de notification)", &m.settings.startWithWindows)) {
-        a.settingsChanged = true; a.startWithWindowsChanged = true;
-    }
-    if (ImGui::Checkbox("Activer le son 3D au lancement", &m.settings.liveOnLaunch)) a.settingsChanged = true;
-    if (ImGui::Checkbox("Fermer la fenêtre = réduire dans la zone de notification", &m.settings.closeToTray)) a.settingsChanged = true;
-    endCard();
-    ImGui::Spacing();
-
-    ImGui::PushStyleColor(ImGuiCol_Text, kDim);
-    ImGui::TextWrapped("Spatial3D %s — BJMPC Informatique. Interface : Dear ImGui (MIT). "
-                       "Carte son virtuelle : VB-Cable de VB-Audio (donationware).", m.version.c_str());
-    ImGui::PopStyleColor();
-    ImGui::EndChild();
     ImGui::EndChild();
 }
 
@@ -593,13 +650,8 @@ void uiDraw(UiModel& m, UiActions& a, float s) {
     statusPill(st, stc);
     ImGui::Spacing();
 
-    if (ImGui::BeginTabBar("##tabs")) {
-        auto fl = [&](int k) { return m.forceTab == k ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None; };
-        if (ImGui::BeginTabItem("  Temps réel  ", nullptr, fl(0))) { liveTab(m, a, s); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("  Réglages  ", nullptr, fl(1))) { settingsTab(m, a, s); ImGui::EndTabItem(); }
-        m.forceTab = -1;
-        ImGui::EndTabBar();
-    }
+    mainView(m, a, s);
+    m.forceTab = -1;
     ImGui::End();
 }
 

@@ -1,5 +1,6 @@
 #include "hrtf_builtin.h"
 #include "vbap.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -73,21 +74,60 @@ std::vector<float> resampleIr(const std::vector<float>& x, double fromHz, double
     return y;
 }
 
+// Début de la réponse (premier échantillon au-dessus de 10 % de la crête) : sert à aligner les
+// réponses voisines avant de les mélanger, sinon l'interpolation creuserait des filtres en peigne.
+static int onsetOf(const float* x, int n) {
+    float pk = 0; for (int i = 0; i < n; ++i) pk = std::max(pk, std::fabs(x[i]));
+    for (int i = 0; i < n; ++i) if (std::fabs(x[i]) >= 0.1f * pk) return i;
+    return 0;
+}
+
 bool builtinHrir(double az, double el, double fs, std::vector<float>& L, std::vector<float>& R, double* gotAz, double* gotEl) {
     const Table& t = table();
     if (!t.ok) return false;
     const Vec3 v = dirVec(az, el);
-    int best = 0; double bd = -2;
+    // les 3 directions mesurées les plus proches
+    int idx[3] = { 0, 0, 0 }; double dot[3] = { -2, -2, -2 };
     for (int m = 0; m < t.count; ++m) {
         const double d = v.x * t.dir[m].x + v.y * t.dir[m].y + v.z * t.dir[m].z;
-        if (d > bd) { bd = d; best = m; }
+        for (int k = 0; k < 3; ++k)
+            if (d > dot[k]) {
+                for (int q = 2; q > k; --q) { dot[q] = dot[q - 1]; idx[q] = idx[q - 1]; }
+                dot[k] = d; idx[k] = m; break;
+            }
     }
-    const float* p = &t.data[(size_t)best * 2 * t.taps];
-    L.assign(p, p + t.taps);
-    R.assign(p + t.taps, p + 2 * t.taps);
+    // poids en inverse de l'écart angulaire (direction exacte = une seule mesure)
+    double w[3], ws = 0;
+    for (int k = 0; k < 3; ++k) {
+        const double ang = std::acos(std::clamp(dot[k], -1.0, 1.0));
+        w[k] = ang < 1e-3 ? 1e9 : 1.0 / ang;
+        ws += w[k];
+    }
+    for (double& x : w) x /= ws;
+    const int T = t.taps;
+    std::vector<float> acc[2] = { std::vector<float>(T, 0.f), std::vector<float>(T, 0.f) };
+    for (int e = 0; e < 2; ++e) {
+        double onset = 0;
+        int on[3];
+        for (int k = 0; k < 3; ++k) {
+            on[k] = onsetOf(&t.data[((size_t)idx[k] * 2 + e) * T], T);
+            onset += w[k] * on[k];
+        }
+        const int target = (int)std::lround(onset);          // retard interpolé (ITD continue)
+        for (int k = 0; k < 3; ++k) {
+            if (w[k] < 1e-6) continue;
+            const float* p = &t.data[((size_t)idx[k] * 2 + e) * T];
+            const int shift = target - on[k];
+            for (int n = 0; n < T; ++n) {
+                const int src = n - shift;
+                if (src >= 0 && src < T) acc[e][n] += (float)w[k] * p[src];
+            }
+        }
+    }
+    L = std::move(acc[0]); R = std::move(acc[1]);
     if (std::fabs(fs - t.fs) >= 0.5) { L = resampleIr(L, t.fs, fs); R = resampleIr(R, t.fs, fs); }
-    if (gotAz) *gotAz = t.az[best];
-    if (gotEl) *gotEl = t.el[best];
+    if (gotAz) *gotAz = t.az[idx[0]];
+    if (gotEl) *gotEl = t.el[idx[0]];
     return true;
 }
 

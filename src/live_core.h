@@ -57,7 +57,9 @@ public:
     void init(double inRate, double outRate, double marginMs = 10, double maxMarginMs = 200);
     // À appeler après chaque bloc rendu, avec ce qui reste dans le tampon. Renvoie le rapport suivant.
     double update(double residualFrames, size_t outFrames);
-    void onUnderrun();                        // coupure : +10 ms de marge
+    // Coupure : +3 ms de marge. Sans coupure, la marge redescend seule de 1 ms par minute jusqu'à
+    // son plancher (latence qui se resserre), sans repasser sous le niveau d'une coupure récente.
+    void onUnderrun();
     double ratio() const { return nominal_ * (1.0 + adj_); }
     double ppm() const { return adj_ * 1e6; }
     double driftPpm() const { return integ_ * 1e6; }     // dérive estimée (partie intégrale)
@@ -67,7 +69,8 @@ public:
     double lowMs() const { return lastLow_ / inRate_ * 1000; }
 private:
     double nominal_ = 1, inRate_ = 48000, outRate_ = 48000;
-    double margin_ = 480, maxMargin_ = 9600;
+    double margin_ = 480, maxMargin_ = 9600, minMargin_ = 240;
+    double quiet_ = 0, sinceUnderrun_ = 1e9, badMargin_ = 0;
     double winLow_ = 1e18, winTime_ = 0, lastLow_ = 0;
     double integ_ = 0, adj_ = 0;
 };

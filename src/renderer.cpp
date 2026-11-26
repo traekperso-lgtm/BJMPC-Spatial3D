@@ -226,10 +226,10 @@ static int lastAbove(const std::vector<float>& h, float relThr) {
 // tête : une HRTF seule, anéchoïque, sonne souvent « dans le crâne ».
 struct EarlyReflection { double az, el, delaySec, gain; };
 static std::vector<EarlyReflection> shoeboxReflections(double az, double el, double dist) {
-    // pièce 5,6 x 4,6 x 2,7 m ; auditeur assis à 1,2 m, un peu en arrière du centre
-    const double xf = 2.9, xb = -2.7, yl = 2.3, yr = -2.3, zf = -1.2, zc = 1.5;   // murs relatifs à l'auditeur
+    // pièce 6,6 x 6 x 2,7 m ; auditeur assis à 1,2 m, un peu en arrière du centre
+    const double xf = 3.6, xb = -3.0, yl = 3.0, yr = -3.0, zf = -1.2, zc = 1.5;   // murs relatifs à l'auditeur
     const Vec3 u = dirVec(az, el);
-    dist = std::min(dist, 2.2);
+    dist = std::clamp(dist, 0.3, 5.0);
     Vec3 S{ u.x * dist, u.y * dist, u.z * dist };
     S.x = std::clamp(S.x, xb + 0.2, xf - 0.2); S.y = std::clamp(S.y, yr + 0.2, yl - 0.2); S.z = std::clamp(S.z, zf + 0.2, zc - 0.2);
     const double d0 = std::sqrt(S.x * S.x + S.y * S.y + S.z * S.z);
@@ -297,7 +297,7 @@ public:
             if (!hrir(src[i].az, src[i].el, L, R)) { ok = false; break; }
             if (early > 0) {
                 double e2 = 1;
-                const auto refl = shoeboxReflections(src[i].az, src[i].el, 2.0);
+                const auto refl = shoeboxReflections(src[i].az, src[i].el, src[i].dist);
                 size_t need = L.size();
                 for (auto& r : refl) need = std::max(need, L.size() + (size_t)std::lround(r.delaySec * fs) + 1);
                 L.resize(need, 0.f); R.resize(need, 0.f);
@@ -319,6 +319,11 @@ public:
                 for (auto& v : L) v *= norm;
                 for (auto& v : R) v *= norm;
             }
+            // distance : niveau en 1/r par rapport à 2,5 m (borné à ±6 dB) ; la part de pièce, elle,
+            // augmente naturellement avec l'éloignement (sources images)
+            const float gd = (float)std::clamp(kDefaultSpeakerDist / std::max(0.1, src[i].dist), 0.5, 2.0);
+            for (auto& v : L) v *= gd;
+            for (auto& v : R) v *= gd;
             hl.push_back(L); hr.push_back(R);
         }
 #ifdef S3D_WITH_MYSOFA
